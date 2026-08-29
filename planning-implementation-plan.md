@@ -58,7 +58,7 @@ This means `pytest tests/implementation/` never produces commits on the `feature
 
 ## Sub-Task 1 — Define Agent Internal Types and Adapter Point
 
-**Status**: [ ] pending
+**Status**: [x] done
 
 ### Intent
 Agents need a stable internal representation of their inputs and outputs without creating production Pydantic models (which Person 1 owns). Define lightweight `TypedDict`s in each agent file for internal use only, and add a clearly marked adapter comment so integration with the real shared schemas is a one-function addition.
@@ -91,7 +91,7 @@ Agents need a stable internal representation of their inputs and outputs without
 
 ## Sub-Task 2 — Implement `compatibility-strategy`
 
-**Status**: [ ] pending
+**Status**: [x] done — commit `0d745d7` on `feature/planning`
 
 ### Intent
 `compatibility-strategy` receives a change request and discovery evidence (dependencies + Evidence objects) encoded as a plain dict and produces a structured migration plan as a plain dict. It derives the migration order by building a NetworkX directed graph from the dependency list — it must never hardcode consumer names.
@@ -210,7 +210,7 @@ Agents need a stable internal representation of their inputs and outputs without
 
 ## Sub-Task 5 — Write `tests/planning/` Suite
 
-**Status**: [ ] pending
+**Status**: [x] done — 26/26 tests pass; commit `0d745d7`
 
 ### Intent
 Prove that `compatibility-strategy` is correct: derives the plan from the dependency graph, produces a valid topological order, handles edge cases cleanly.
