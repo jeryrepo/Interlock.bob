@@ -7,6 +7,12 @@ Scans fixture repositories for schema and migration files that reference
 the target field (default: "customer_id").  Uses simple line-by-line text
 search (appropriate for SQL and config files, which are not Python AST).
 
+Canonical edge direction:
+  from_component = consumer  (the component whose schema references the field)
+  to_component   = provider  (account-service, which owns the field)
+
+e.g. platform-config -> account-service
+
 Returns a dict that validates as DiscoveryResult.
 Does NOT write to the database directly.
 Does NOT call other agents.
@@ -148,8 +154,8 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
         dependencies.append(
             Dependency(
-                from_component=_PROVIDER,
-                to_component=component,
+                from_component=component,
+                to_component=_PROVIDER,
                 edge_type="db",
                 reason=(
                     f"Schema file references '{old_field}' at {source_ref}"
