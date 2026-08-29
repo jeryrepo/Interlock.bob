@@ -76,7 +76,7 @@ def _run_git(args: list[str], repo_path: Path) -> str:
 
 def _run_pytest(repo_path: Path) -> tuple[int, str]:
     """Run pytest inside repo_path; return (returncode, combined_output)."""
-    cmd = [sys.executable, "-m", "pytest", str(repo_path), "-v", "--tb=short"]
+    cmd = [sys.executable, "-m", "pytest", str(repo_path), "-v", "--tb=short", "-p", "no:langsmith"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     combined = result.stdout + result.stderr
     return result.returncode, combined
@@ -413,20 +413,29 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
         )
 
     # ------------------------------------------------------------------
-    # Step 7: Git commit.
+    # Step 7: Git commit (only if there is something to commit).
     # ------------------------------------------------------------------
     _run_git(["add", "."], repo_path)
-    _run_git(
-        [
-            "commit",
-            "-m",
-            f"provider-patch: add {new_field}, retain {old_field}",
-        ],
-        repo_path,
+
+    # Check whether git actually has staged changes before committing.
+    status_result = subprocess.run(
+        ["git", "-C", str(repo_path), "diff", "--cached", "--quiet"],
+        capture_output=True,
     )
+    has_staged = status_result.returncode != 0  # exit 1 means differences exist
+
+    if has_staged:
+        _run_git(
+            [
+                "commit",
+                "-m",
+                f"provider-patch: add {new_field}, retain {old_field}",
+            ],
+            repo_path,
+        )
 
     # ------------------------------------------------------------------
-    # Step 8: Retrieve the real commit SHA.
+    # Step 8: Retrieve the real commit SHA (HEAD, whether new or existing).
     # ------------------------------------------------------------------
     commit_sha = _run_git(["rev-parse", "HEAD"], repo_path)
 
