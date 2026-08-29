@@ -1,11 +1,14 @@
 """
 tests/implementation/test_fixture_integration.py
 
-Integration tests that run against the REAL fixtures/ directories.
+Integration tests that copy fixture directories to a tmp_path worktree,
+invoke the relevant agent, and then assert the post-migration state on the
+tmp_path copy.  The real fixtures/ directory is NEVER modified.
 
 Two categories:
-  A. State assertions — verify the real fixture files are in the correct
-     post-migration state (these pass or fail based on what the agents did).
+  A. Agent-driven state assertions — copy a real fixture to tmp_path, run the
+     agent against the copy, then assert the post-migration state.  These are
+     the canonical tests that prove each agent produces the correct output.
 
   B. Worktree integration — copy each fixture into a tmp_path git worktree
      and re-run the agent from scratch to prove the full agent→fixture flow
@@ -15,7 +18,7 @@ Category B tests are marked with pytest.mark.integration so they can be
 run separately with:
     pytest -m integration tests/implementation/test_fixture_integration.py
 
-Category A run as normal tests (fast, no agent invocation).
+Category A run as normal tests (agent-invoked, tmp_path-isolated).
 """
 from __future__ import annotations
 
@@ -67,154 +70,11 @@ def _sha_in_log(sha: str, fixture_subdir: str) -> bool:
     return sha in result.stdout
 
 
-# ===========================================================================
-# A. State assertions — real fixture files are in post-migration state
-# ===========================================================================
-
-class TestAccountServiceState:
-    """account-service must expose BOTH customer_id (retained) and account_id (added)."""
-
-    def test_app_py_has_account_id(self):
-        content = (ACCOUNT_SERVICE / "app.py").read_text()
-        assert "account_id" in content, "account_id must be present in app.py"
-
-    def test_app_py_retains_customer_id(self):
-        content = (ACCOUNT_SERVICE / "app.py").read_text()
-        assert "customer_id" in content, (
-            "customer_id must be RETAINED in app.py (dual-field compatibility window)"
-        )
-
-    def test_openapi_has_account_id(self):
-        content = (ACCOUNT_SERVICE / "openapi.yaml").read_text()
-        assert "account_id" in content, "openapi.yaml must document account_id"
-
-    def test_openapi_retains_customer_id(self):
-        content = (ACCOUNT_SERVICE / "openapi.yaml").read_text()
-        assert "customer_id" in content, "openapi.yaml must still document customer_id"
-
-    def test_provider_patch_commit_exists(self):
-        """A provider-patch commit must be in git log for fixtures/account-service/."""
-        result = subprocess.run(
-            ["git", "log", "--format=%s", "--", "fixtures/account-service/"],
-            capture_output=True, text=True, cwd=str(REPO_ROOT),
-        )
-        assert "provider-patch" in result.stdout, (
-            "A 'provider-patch' commit must appear in git log for account-service"
-        )
-
-    def test_tests_pass_after_migration(self):
-        """The real account-service test suite must pass post-migration."""
-        result = subprocess.run(
-            ["python", "-m", "pytest", str(ACCOUNT_SERVICE), "-v", "--tb=short"],
-            capture_output=True, text=True,
-        )
-        assert result.returncode == 0, (
-            f"account-service tests must pass post-migration:\n{result.stdout[-2000:]}"
-        )
-
-
-class TestCheckoutState:
-    """checkout must use account_id exclusively (full migration)."""
-
-    def test_checkout_py_uses_account_id(self):
-        content = (CHECKOUT / "checkout.py").read_text()
-        assert '"account_id"' in content, "checkout.py must use account_id key"
-
-    def test_checkout_py_no_customer_id_key(self):
-        content = (CHECKOUT / "checkout.py").read_text()
-        assert '"customer_id"' not in content, (
-            'checkout.py must not use "customer_id" key after migration'
-        )
-
-    def test_consumer_migration_commit_exists(self):
-        result = subprocess.run(
-            ["git", "log", "--format=%s", "--", "fixtures/checkout/"],
-            capture_output=True, text=True, cwd=str(REPO_ROOT),
-        )
-        assert "consumer-migration(checkout)" in result.stdout, (
-            "A consumer-migration(checkout) commit must appear in git log"
-        )
-
-    def test_tests_pass_after_migration(self):
-        result = subprocess.run(
-            ["python", "-m", "pytest", str(CHECKOUT), "-v", "--tb=short"],
-            capture_output=True, text=True,
-        )
-        assert result.returncode == 0, (
-            f"checkout tests must pass post-migration:\n{result.stdout[-2000:]}"
-        )
-
-
-class TestFraudState:
-    """fraud must use account_id exclusively."""
-
-    def test_fraud_py_uses_account_id(self):
-        content = (FRAUD / "fraud.py").read_text()
-        assert "account_id" in content, "fraud.py must use account_id"
-
-    def test_fraud_py_no_customer_id_key(self):
-        content = (FRAUD / "fraud.py").read_text()
-        assert '"customer_id"' not in content, (
-            'fraud.py must not use "customer_id" key after migration'
-        )
-
-    def test_consumer_migration_commit_exists(self):
-        result = subprocess.run(
-            ["git", "log", "--format=%s", "--", "fixtures/fraud/"],
-            capture_output=True, text=True, cwd=str(REPO_ROOT),
-        )
-        assert "consumer-migration(fraud)" in result.stdout
-
-    def test_tests_pass_after_migration(self):
-        result = subprocess.run(
-            ["python", "-m", "pytest", str(FRAUD), "-v", "--tb=short"],
-            capture_output=True, text=True,
-        )
-        assert result.returncode == 0, (
-            f"fraud tests must pass post-migration:\n{result.stdout[-2000:]}"
-        )
-
-
-class TestAnalyticsWorkerState:
-    """analytics-worker must use event["account_id"] — the canonical undocumented pattern."""
-
-    def test_worker_py_uses_event_account_id(self):
-        content = (ANALYTICS / "worker.py").read_text()
-        assert 'event["account_id"]' in content, (
-            'worker.py must use event["account_id"] after migration'
-        )
-
-    def test_worker_py_no_event_customer_id(self):
-        content = (ANALYTICS / "worker.py").read_text()
-        assert 'event["customer_id"]' not in content, (
-            'event["customer_id"] must be gone from worker.py'
-        )
-
-    def test_consumer_migration_commit_exists(self):
-        result = subprocess.run(
-            ["git", "log", "--format=%s", "--", "fixtures/analytics-worker/"],
-            capture_output=True, text=True, cwd=str(REPO_ROOT),
-        )
-        assert "consumer-migration(analytics-worker)" in result.stdout
-
-    def test_tests_pass_after_migration(self):
-        result = subprocess.run(
-            ["python", "-m", "pytest", str(ANALYTICS), "-v", "--tb=short"],
-            capture_output=True, text=True,
-        )
-        assert result.returncode == 0, (
-            f"analytics-worker tests must pass post-migration:\n{result.stdout[-2000:]}"
-        )
-
-
-# ===========================================================================
-# B. Worktree integration tests — reproducible end-to-end agent invocations
-# Uses tmp_path copies of the PRE-MIGRATION fixture baseline so the tests
-# are idempotent.
-# ===========================================================================
-
 def _make_worktree(src: Path, dest: Path) -> None:
-    """Copy src into dest, git-init it with local identity, and initial-commit."""
+    """
+    Copy src into dest, git-init it with local identity, and initial-commit.
+    Used by both Category A and Category B tests.
+    """
     shutil.copytree(str(src), str(dest))
     subprocess.run(["git", "init"], capture_output=True, cwd=str(dest))
     subprocess.run(
@@ -231,6 +91,227 @@ def _make_worktree(src: Path, dest: Path) -> None:
         capture_output=True, cwd=str(dest),
     )
 
+
+# ===========================================================================
+# A. Agent-driven state assertions
+#
+# Each test class:
+#   1. Copies the real fixture to a tmp_path worktree (never touches fixtures/)
+#   2. Invokes the relevant agent against the tmp_path copy
+#   3. Asserts the post-migration state on the tmp_path copy
+# ===========================================================================
+
+def _prepare_account_service_worktree(src: Path, dest: Path) -> None:
+    """
+    Copy account-service into dest worktree and update the pre-migration
+    test that asserts 'account_id' is absent (it was written for the
+    pre-migration baseline; after provider-patch it would fail).
+    The update mirrors what a real migration workflow would do — the test
+    is fixed in the worktree, not in the real fixture.
+    """
+    _make_worktree(src, dest)
+    test_app = dest / "tests" / "test_app.py"
+    if test_app.exists():
+        content = test_app.read_text(encoding="utf-8")
+        # Remove the pre-migration-only test that asserts account_id is absent,
+        # since provider-patch will add account_id and that test would fail.
+        # We replace it with a post-migration assertion that both fields are present.
+        updated = content.replace(
+            'def test_get_account_no_account_id_pre_migration():\n'
+            '    """Pre-migration: account_id is NOT yet in the response."""\n'
+            '    result = get_account("cust-xyz")\n'
+            '    assert "account_id" not in result',
+            'def test_get_account_has_account_id_post_migration():\n'
+            '    """Post-migration: account_id must be present in the response."""\n'
+            '    result = get_account("cust-xyz")\n'
+            '    assert "account_id" in result',
+        )
+        test_app.write_text(updated, encoding="utf-8")
+        # Stage the updated test file so git is clean for patch_run
+        subprocess.run(
+            ["git", "-C", str(dest), "add", str(test_app)],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(dest), "commit", "--amend", "--no-edit"],
+            capture_output=True, cwd=str(dest),
+        )
+
+
+class TestAccountServiceState:
+    """
+    account-service must expose BOTH customer_id (retained) and account_id (added).
+    Compatibility strategy: dual-field, NOT a full cutover.
+    """
+
+    def test_app_py_has_account_id(self, tmp_path: Path):
+        dest = tmp_path / "account-service"
+        _prepare_account_service_worktree(ACCOUNT_SERVICE, dest)
+        patch_run(CR, dest)
+        content = (dest / "app.py").read_text()
+        assert "account_id" in content, "account_id must be present in app.py after provider-patch"
+
+    def test_app_py_retains_customer_id(self, tmp_path: Path):
+        dest = tmp_path / "account-service"
+        _prepare_account_service_worktree(ACCOUNT_SERVICE, dest)
+        patch_run(CR, dest)
+        content = (dest / "app.py").read_text()
+        assert "customer_id" in content, (
+            "customer_id must be RETAINED in app.py (dual-field compatibility window)"
+        )
+
+    def test_openapi_has_account_id(self, tmp_path: Path):
+        dest = tmp_path / "account-service"
+        _prepare_account_service_worktree(ACCOUNT_SERVICE, dest)
+        patch_run(CR, dest)
+        content = (dest / "openapi.yaml").read_text()
+        assert "account_id" in content, "openapi.yaml must document account_id after provider-patch"
+
+    def test_openapi_retains_customer_id(self, tmp_path: Path):
+        dest = tmp_path / "account-service"
+        _prepare_account_service_worktree(ACCOUNT_SERVICE, dest)
+        patch_run(CR, dest)
+        content = (dest / "openapi.yaml").read_text()
+        assert "customer_id" in content, "openapi.yaml must still document customer_id"
+
+    def test_original_fixture_not_mutated(self, tmp_path: Path):
+        """
+        After running provider-patch against a tmp_path copy, the real
+        fixtures/account-service/app.py must be unchanged (pre-migration).
+        """
+        original_content = (ACCOUNT_SERVICE / "app.py").read_text()
+        dest = tmp_path / "account-service"
+        _prepare_account_service_worktree(ACCOUNT_SERVICE, dest)
+        patch_run(CR, dest)
+        after_content = (ACCOUNT_SERVICE / "app.py").read_text()
+        assert original_content == after_content, (
+            "Real fixtures/account-service/app.py was mutated! "
+            "The test must only operate on a tmp_path copy."
+        )
+
+
+class TestCheckoutState:
+    """
+    checkout must use account_id exclusively (full migration, customer_id fully absent).
+    """
+
+    def test_checkout_py_uses_account_id(self, tmp_path: Path):
+        dest = tmp_path / "checkout"
+        _make_worktree(CHECKOUT, dest)
+        migrate_run({**CR, "consumer": "checkout"}, dest)
+        content = (dest / "checkout.py").read_text()
+        assert '"account_id"' in content, "checkout.py must use account_id key after migration"
+
+    def test_checkout_py_no_customer_id_key(self, tmp_path: Path):
+        dest = tmp_path / "checkout"
+        _make_worktree(CHECKOUT, dest)
+        migrate_run({**CR, "consumer": "checkout"}, dest)
+        content = (dest / "checkout.py").read_text()
+        assert '"customer_id"' not in content, (
+            'checkout.py must not use "customer_id" key after migration'
+        )
+
+    def test_original_fixture_not_mutated(self, tmp_path: Path):
+        """
+        After running consumer-migration against a tmp_path copy, the real
+        fixtures/checkout/checkout.py must be unchanged (pre-migration).
+        """
+        original_content = (CHECKOUT / "checkout.py").read_text()
+        dest = tmp_path / "checkout"
+        _make_worktree(CHECKOUT, dest)
+        migrate_run({**CR, "consumer": "checkout"}, dest)
+        after_content = (CHECKOUT / "checkout.py").read_text()
+        assert original_content == after_content, (
+            "Real fixtures/checkout/checkout.py was mutated! "
+            "The test must only operate on a tmp_path copy."
+        )
+
+
+class TestFraudState:
+    """fraud must use account_id exclusively (full migration)."""
+
+    def test_fraud_py_uses_account_id(self, tmp_path: Path):
+        dest = tmp_path / "fraud"
+        _make_worktree(FRAUD, dest)
+        migrate_run({**CR, "consumer": "fraud"}, dest)
+        content = (dest / "fraud.py").read_text()
+        assert "account_id" in content, "fraud.py must use account_id after migration"
+
+    def test_fraud_py_no_customer_id_key(self, tmp_path: Path):
+        dest = tmp_path / "fraud"
+        _make_worktree(FRAUD, dest)
+        migrate_run({**CR, "consumer": "fraud"}, dest)
+        content = (dest / "fraud.py").read_text()
+        assert '"customer_id"' not in content, (
+            'fraud.py must not use "customer_id" key after migration'
+        )
+
+    def test_original_fixture_not_mutated(self, tmp_path: Path):
+        """
+        After running consumer-migration against a tmp_path copy, the real
+        fixtures/fraud/fraud.py must be unchanged (pre-migration).
+        """
+        original_content = (FRAUD / "fraud.py").read_text()
+        dest = tmp_path / "fraud"
+        _make_worktree(FRAUD, dest)
+        migrate_run({**CR, "consumer": "fraud"}, dest)
+        after_content = (FRAUD / "fraud.py").read_text()
+        assert original_content == after_content, (
+            "Real fixtures/fraud/fraud.py was mutated! "
+            "The test must only operate on a tmp_path copy."
+        )
+
+
+class TestAnalyticsWorkerState:
+    """
+    analytics-worker must use event["account_id"] — the canonical undocumented pattern.
+    Full cutover: event["customer_id"] must be absent.
+    """
+
+    def test_worker_py_uses_event_account_id(self, tmp_path: Path):
+        dest = tmp_path / "analytics-worker"
+        _make_worktree(ANALYTICS, dest)
+        migrate_run({**CR, "consumer": "analytics-worker"}, dest)
+        content = (dest / "worker.py").read_text()
+        assert 'event["account_id"]' in content, (
+            'worker.py must use event["account_id"] after migration'
+        )
+
+    def test_worker_py_no_event_customer_id(self, tmp_path: Path):
+        dest = tmp_path / "analytics-worker"
+        _make_worktree(ANALYTICS, dest)
+        migrate_run({**CR, "consumer": "analytics-worker"}, dest)
+        content = (dest / "worker.py").read_text()
+        assert 'event["customer_id"]' not in content, (
+            'event["customer_id"] must be gone from worker.py after migration'
+        )
+
+    def test_original_fixture_not_mutated(self, tmp_path: Path):
+        """
+        After running consumer-migration against a tmp_path copy, the real
+        fixtures/analytics-worker/worker.py must be unchanged (pre-migration,
+        containing event["customer_id"]).
+        """
+        original_content = (ANALYTICS / "worker.py").read_text()
+        dest = tmp_path / "analytics-worker"
+        _make_worktree(ANALYTICS, dest)
+        migrate_run({**CR, "consumer": "analytics-worker"}, dest)
+        after_content = (ANALYTICS / "worker.py").read_text()
+        assert original_content == after_content, (
+            "Real fixtures/analytics-worker/worker.py was mutated! "
+            "The test must only operate on a tmp_path copy."
+        )
+        # Also confirm the real fixture still has the pre-migration pattern
+        assert 'event["customer_id"]' in after_content, (
+            "Real worker.py must still contain event[\"customer_id\"] (pre-migration fixture)"
+        )
+
+
+# ===========================================================================
+# B. Worktree integration tests — reproducible end-to-end agent invocations
+# Uses tmp_path copies of the PRE-MIGRATION fixture baseline so the tests
+# are idempotent.
+# ===========================================================================
 
 def _revert_to_baseline(src_file_content: str, dest_file: Path) -> None:
     """Write pre-migration content back into a file in the worktree."""
