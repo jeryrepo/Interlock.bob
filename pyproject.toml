@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "interlock"
+version = "0.1.0"
+description = "A change-safety control plane for breaking cross-service changes."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "networkx",
+    "requests",
+    "httpx",
+    "pyyaml",
+    "typer",
+]
+
+[project.optional-dependencies]
+# The Streamlit UI is optional: the CLI, the MCP server and the API do not need it.
+ui = ["streamlit", "pyvis"]
+# The MCP server that lets IBM Bob and other coding agents call Interlock.
+mcp = ["mcp"]
+dev = ["pytest"]
+
+[project.scripts]
+interlock = "interlock_cli.cli:main"
+interlock-mcp = "interlock_mcp.server:main"
+
+[tool.setuptools]
+packages = [
+    "orchestrator",
+    "orchestrator.schemas",
+    "agents",
+    "agents.discovery",
+    "agents.planning",
+    "agents.implementation",
+    "agents.verification",
+    "agents.verification.rehearsal",
+    "interlock_cli",
+    "interlock_mcp",
+]
+
+[tool.setuptools.package-data]
+orchestrator = ["db/*.sql"]

@@ -491,3 +491,95 @@ class TestNoFixtureMutation:
         assert (FIXTURES / "fraud" / "fraud.py").read_text() == fraud_before
         assert (FIXTURES / "analytics-worker" / "worker.py").read_text() == analytics_before
         assert (FIXTURES / "account-service" / "app.py").read_text() == account_before
+
+
+# ---------------------------------------------------------------------------
+# Invariant 6: no hardcoded components
+# ---------------------------------------------------------------------------
+
+class TestNoHardcodedComponents:
+    """
+    The missing-commit check used to consult a frozenset of the four demo
+    component names. That hardcoded `analytics-worker` — the dependency the
+    product claims to *discover* — and silently skipped the check for any
+    component outside the list, weakening verification precisely where it
+    mattered. These tests pin the replacement behaviour.
+    """
+
+    def test_component_names_are_not_hardcoded_in_source(self):
+        """
+        No discovered component name may appear as a runtime literal. The
+        explanatory comment about the old bug is allowed; executable code is not.
+        """
+        import ast
+
+        source = Path(critic_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        literals = {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        # Docstrings are Constant nodes too, so only flag exact-match literals.
+        for name in ("analytics-worker", "checkout", "fraud", "account-service"):
+            assert name not in literals, (
+                f"{name!r} appears as a string literal in critic.py. Components "
+                "must arrive from evidence (AGENTS.md invariant 6)."
+            )
+
+    def test_newly_discovered_component_is_checked(self):
+        """
+        A component that was never in the old allowlist must now be flagged for
+        a missing commit SHA. This is the bug the rewrite fixes.
+        """
+        items = [
+            {
+                "id": "ev-dep-billing",
+                "change_id": CHANGE_ID,
+                "claim_type": "dependency",
+                "subject": "billing-reconciler",
+                "content": {"edge_type": "event"},
+                "source_ref": "/fixtures/billing-reconciler",
+                "confidence": "confirmed",
+                "source_revision": None,
+                "created_at": _NOW_TS,
+            },
+            _migration_evidence("billing-reconciler", commit_sha=None),
+        ]
+        components = critic_module._component_subjects(items)
+        assert components == {"billing-reconciler"}
+
+        risks = _check_missing_commit_refs(items, CHANGE_ID, components=components)
+        assert len(risks) == 1
+        assert risks[0].subject == "billing-reconciler"
+        assert risks[0].content["risk"] == "no_commit_ref"
+
+    def test_planning_artifact_still_not_flagged_when_components_known(self):
+        """The 625828d regression must stay fixed on the evidence-derived path."""
+        items = [
+            {
+                "id": "ev-dep-checkout",
+                "change_id": CHANGE_ID,
+                "claim_type": "dependency",
+                "subject": "checkout",
+                "content": {"edge_type": "api"},
+                "source_ref": "/fixtures/checkout",
+                "confidence": "confirmed",
+                "source_revision": None,
+                "created_at": _NOW_TS,
+            },
+            {
+                "id": "ev-migration-plan",
+                "change_id": CHANGE_ID,
+                "claim_type": "migration_status",
+                "subject": "migration-plan",
+                "content": {"action": "compatibility strategy planned"},
+                "source_ref": "/agents/planning/output",
+                "confidence": "confirmed",
+                "source_revision": None,
+                "created_at": _NOW_TS,
+            },
+        ]
+        components = critic_module._component_subjects(items)
+        risks = _check_missing_commit_refs(items, CHANGE_ID, components=components)
+        assert risks == []

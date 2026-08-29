@@ -17,6 +17,42 @@ approve past it while a consumer is unverified.
 
 ## Quick start
 
+Three ways in: a CLI, an MCP server for coding agents, and the API + Streamlit UI.
+
+### As a CLI (no server required)
+
+```bash
+pip install -e .
+```
+
+```bash
+interlock check --old customer_id --new account_id --provider account-service
+```
+
+Discovers every consumer, migrates and verifies them on an isolated copy of the
+component tree, and prints the deterministic verdict. **Exits non-zero when the
+change is not proven safe**, so it works as a pre-push hook or a CI step:
+
+```bash
+interlock check --old customer_id --new account_id --provider account-service || echo "blocked"
+```
+
+Other commands: `start`, `approve`, `gate`, `status`, `list`, `evidence`.
+Add `--json` to any of them for machine-readable output.
+
+### As a tool for IBM Bob and other coding agents
+
+The repository ships `.bob/mcp.json` (IBM Bob) and `.mcp.json` (Claude Code,
+Cursor, Copilot), both pointing at the bundled MCP server over stdio. Clone the
+repo, `pip install -e ".[mcp]"`, and the agent can call `interlock_check`,
+`interlock_gate`, `interlock_evidence` and `interlock_dependency_graph`
+directly.
+
+An agent can *read* the verdict but never influence it: there is no tool to
+override the gate or approve legacy removal.
+
+### As a service
+
 Two processes: a FastAPI backend and a Streamlit UI that talks to it over HTTP.
 
 **1. Activate the virtual environment**
@@ -151,13 +187,17 @@ Full suite (~2 minutes):
 python -m pytest -q
 ```
 
-**Known issue:** four tests in `tests/implementation/test_consumer_migration.py`
-fail in a full-suite run but pass when that file runs alone — a test-ordering
-problem in that module, not a product bug:
+The suite should be fully green. If it is not, check the note below before
+assuming a product bug.
 
-```bash
-python -m pytest tests/implementation/test_consumer_migration.py -q
-```
+**Do not add `__init__.py` to a `tests/` subdirectory.** `tests/` itself has
+none, so adding one to a subdirectory makes pytest name the module
+`verification.test_critic` instead of `tests.verification.test_critic`, which
+only resolves when that directory is run on its own. The result looks like a
+test-ordering problem and is not one. See `AGENTS.md` for the measured details.
+
+Related: never `import` a `conftest.py` directly — use the fixtures it exposes.
+Four tests failed this way until 2026-08-29.
 
 `pytest.ini` sets `--basetemp=.pytest_tmp` to avoid Windows temp-permission
 errors; that directory is gitignored.

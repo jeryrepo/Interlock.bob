@@ -7,3 +7,6 @@ streamlit
 pyvis
 requests
 pyyaml
+httpx
+typer
+mcp

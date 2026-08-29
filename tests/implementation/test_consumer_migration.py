@@ -170,21 +170,18 @@ class TestFraudMigration:
         assert result["consumer"] == "fraud"
 
     def test_fraud_and_checkout_have_distinct_shas(
-        self, tmp_path: Path, migration_data: dict
+        self, tmp_checkout_repo: Path, tmp_fraud_repo: Path, migration_data: dict
     ):
         """
         Running migration on two separate repos must yield two different SHAs.
         This proves each call produces its own independent commit.
         """
-        from tests.implementation.conftest import (
-            _make_checkout_repo,
-            _make_fraud_repo,
+        result_a = migrate_run(
+            {**migration_data, "consumer": "checkout"}, tmp_checkout_repo
         )
-        repo_a = _make_checkout_repo(tmp_path)
-        repo_b = _make_fraud_repo(tmp_path)
-
-        result_a = migrate_run({**migration_data, "consumer": "checkout"}, repo_a)
-        result_b = migrate_run({**migration_data, "consumer": "fraud"}, repo_b)
+        result_b = migrate_run(
+            {**migration_data, "consumer": "fraud"}, tmp_fraud_repo
+        )
 
         assert result_a["commit_sha"] != result_b["commit_sha"], (
             "Two separate repos must produce distinct SHAs"
@@ -449,24 +446,17 @@ class TestSHAValidity:
 
 class TestIsolation:
     def test_migrating_checkout_does_not_modify_fraud(
-        self, tmp_path: Path, migration_data: dict
+        self, tmp_checkout_repo: Path, tmp_fraud_repo: Path, migration_data: dict
     ):
         """
         Patching checkout repo must not change any file in the fraud repo.
         Both repos live under the same tmp_path parent.
         """
-        from tests.implementation.conftest import (
-            _make_checkout_repo,
-            _make_fraud_repo,
-        )
-        checkout_repo = _make_checkout_repo(tmp_path)
-        fraud_repo = _make_fraud_repo(tmp_path)
+        fraud_before = (tmp_fraud_repo / "fraud.py").read_text()
 
-        fraud_before = (fraud_repo / "fraud.py").read_text()
+        migrate_run({**migration_data, "consumer": "checkout"}, tmp_checkout_repo)
 
-        migrate_run({**migration_data, "consumer": "checkout"}, checkout_repo)
-
-        fraud_after = (fraud_repo / "fraud.py").read_text()
+        fraud_after = (tmp_fraud_repo / "fraud.py").read_text()
         assert fraud_before == fraud_after, (
             "Migrating checkout must not modify fraud/fraud.py"
         )
@@ -563,46 +553,45 @@ class TestOutputSchema:
 
 class TestDistinctCommits:
     def test_two_consumers_distinct_shas(
-        self, tmp_path: Path, migration_data: dict
+        self,
+        tmp_checkout_repo: Path,
+        tmp_analytics_worker_repo: Path,
+        migration_data: dict,
     ):
         """
         Running migration on two separate tmp repos yields two different SHAs.
         This is the canonical proof that each call produces its own commit.
         """
-        from tests.implementation.conftest import (
-            _make_checkout_repo,
-            _make_analytics_worker_repo,
-        )
-        repo_checkout = _make_checkout_repo(tmp_path)
-        repo_analytics = _make_analytics_worker_repo(tmp_path)
-
         r1 = migrate_run(
-            {**migration_data, "consumer": "checkout"}, repo_checkout
+            {**migration_data, "consumer": "checkout"}, tmp_checkout_repo
         )
         r2 = migrate_run(
-            {**migration_data, "consumer": "analytics-worker"}, repo_analytics
+            {**migration_data, "consumer": "analytics-worker"},
+            tmp_analytics_worker_repo,
         )
 
         assert r1["commit_sha"] != r2["commit_sha"], (
             "Each consumer migration must produce a distinct commit SHA"
         )
 
-    def test_three_consumers_all_distinct(self, tmp_path: Path, migration_data: dict):
+    def test_three_consumers_all_distinct(
+        self,
+        tmp_checkout_repo: Path,
+        tmp_fraud_repo: Path,
+        tmp_analytics_worker_repo: Path,
+        migration_data: dict,
+    ):
         """
         Running all three consumer migrations produces three unique SHAs.
         """
-        from tests.implementation.conftest import (
-            _make_checkout_repo,
-            _make_fraud_repo,
-            _make_analytics_worker_repo,
+        rc = migrate_run(
+            {**migration_data, "consumer": "checkout"}, tmp_checkout_repo
         )
-        repo_c = _make_checkout_repo(tmp_path)
-        repo_f = _make_fraud_repo(tmp_path)
-        repo_a = _make_analytics_worker_repo(tmp_path)
-
-        rc = migrate_run({**migration_data, "consumer": "checkout"}, repo_c)
-        rf = migrate_run({**migration_data, "consumer": "fraud"}, repo_f)
-        ra = migrate_run({**migration_data, "consumer": "analytics-worker"}, repo_a)
+        rf = migrate_run({**migration_data, "consumer": "fraud"}, tmp_fraud_repo)
+        ra = migrate_run(
+            {**migration_data, "consumer": "analytics-worker"},
+            tmp_analytics_worker_repo,
+        )
 
         shas = {rc["commit_sha"], rf["commit_sha"], ra["commit_sha"]}
         assert len(shas) == 3, (
