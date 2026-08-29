@@ -126,9 +126,10 @@ class TestEvidence:
             "confidence": "confirmed",
             "source_revision": "abc1234",
         }
+        # Canonical edge: provider (account-service) -> consumer (svc-a)
         data = {
             "change_request": {"id": "cr-x", "old_field": "customer_id", "new_field": "account_id", "provider": "account-service"},
-            "dependencies": [{"from_component": "svc-a", "to_component": "account-service", "edge_type": "api", "reason": None}],
+            "dependencies": [{"from_component": "account-service", "to_component": "svc-a", "edge_type": "api", "reason": None}],
             "evidence": [incoming],
         }
         result = run(data)
@@ -244,3 +245,91 @@ class TestNoConsumers:
         assert components_in_steps(result) == ["account-service"]
         assert result["affected_consumers"] == []
         assert result["verification_requirements"] == []
+
+
+class TestCanonicalEdgeDirection:
+    """
+    Regression tests verifying correct canonical edge direction.
+
+    Canonical contract (00_SHARED_TEAM_CONTRACT.md):
+      from_component = provider
+      to_component   = consumer
+
+    Graph: account-service -> service-alpha
+           account-service -> service-beta
+           service-beta    -> service-gamma  (transitive)
+
+    All three downstream nodes must be affected consumers.
+    service-gamma must appear after service-beta in the migration order
+    (it cannot migrate until service-beta has migrated first).
+    An unrelated node (svc-unrelated, consumer of other-service) must be excluded.
+    """
+
+    def test_all_downstream_affected(self, canonical_transitive_input):
+        result = run(canonical_transitive_input)
+        for consumer in ["service-alpha", "service-beta", "service-gamma"]:
+            assert consumer in result["affected_consumers"], (
+                f"'{consumer}' should be an affected consumer"
+            )
+
+    def test_provider_not_in_affected_consumers(self, canonical_transitive_input):
+        result = run(canonical_transitive_input)
+        assert "account-service" not in result["affected_consumers"]
+
+    def test_provider_is_first_step(self, canonical_transitive_input):
+        result = run(canonical_transitive_input)
+        assert components_in_steps(result)[0] == "account-service"
+
+    def test_transitive_consumer_after_its_provider(self, canonical_transitive_input):
+        """service-gamma depends on service-beta; service-beta must come first."""
+        result = run(canonical_transitive_input)
+        steps = components_in_steps(result)
+        assert "service-beta" in steps
+        assert "service-gamma" in steps
+        beta_idx = steps.index("service-beta")
+        gamma_idx = steps.index("service-gamma")
+        assert beta_idx < gamma_idx, (
+            f"service-beta (idx {beta_idx}) must precede service-gamma (idx {gamma_idx})"
+        )
+
+    def test_direct_consumers_before_transitive(self, canonical_transitive_input):
+        """service-alpha and service-beta are direct; service-gamma is transitive."""
+        result = run(canonical_transitive_input)
+        steps = components_in_steps(result)
+        gamma_idx = steps.index("service-gamma")
+        for direct in ["service-alpha", "service-beta"]:
+            assert steps.index(direct) < gamma_idx, (
+                f"Direct consumer '{direct}' must appear before transitive 'service-gamma'"
+            )
+
+    def test_unrelated_component_excluded(self, canonical_transitive_input):
+        """
+        Add an unrelated edge (other-service -> svc-unrelated) to the input.
+        svc-unrelated has no path from account-service and must be excluded.
+        """
+        data = dict(canonical_transitive_input)
+        data["dependencies"] = list(data["dependencies"]) + [
+            {"from_component": "other-service", "to_component": "svc-unrelated",
+             "edge_type": "api", "reason": None}
+        ]
+        result = run(data)
+        assert "svc-unrelated" not in result["affected_consumers"]
+        assert "svc-unrelated" not in components_in_steps(result)
+        assert "other-service" not in result["affected_consumers"]
+
+    def test_step_count(self, canonical_transitive_input):
+        """1 provider + 3 consumers = 4 steps."""
+        result = run(canonical_transitive_input)
+        assert len(result["migration_steps"]) == 4
+
+    def test_evidence_cites_provider_to_consumer_direction(self, canonical_transitive_input):
+        """Evidence source_ref must read provider->consumer, not consumer->provider."""
+        result = run(canonical_transitive_input)
+        for ev in result["evidence"]:
+            if ev["claim_type"] == "dependency":
+                # source_ref format: "dependency:<provider>-><consumer>" or a reason string
+                # It must NOT be in the reversed consumer->provider direction
+                subject = ev["subject"]
+                assert f"dependency:{subject}->account-service" not in ev["source_ref"], (
+                    f"Evidence for '{subject}' has reversed source_ref: {ev['source_ref']}"
+                )
