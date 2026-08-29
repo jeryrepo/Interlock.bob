@@ -1,0 +1,6 @@
+{
+  "webhook_path": "/hooks/accounts",
+  "window_seconds": 900,
+  "calls_in_window": 0,
+  "note": "Populated by the delivery infrastructure; read by the webhook-quiet agent."
+}

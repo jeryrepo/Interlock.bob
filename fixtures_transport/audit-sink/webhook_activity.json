@@ -1,0 +1,5 @@
+{
+  "webhook_path": "/hooks/accounts",
+  "window_seconds": 900,
+  "calls_in_window": 0
+}
