@@ -227,6 +227,18 @@ def _ensure_test_assertions(
     If no existing test file content, generate a minimal test.
     Returns (new_content, was_changed).
     """
+    # A pre-migration suite may assert that new_field is ABSENT.  That
+    # assertion documents the state before the patch, and this patch is exactly
+    # what makes it false — so leaving it would fail the provider's own suite
+    # and cause the patch to be rejected.  Flip it rather than delete it: after
+    # the compatibility window opens, the field genuinely is present.
+    negative = re.compile(
+        r'(assert\s+["\']' + re.escape(new_field) + r'["\']\s+)not\s+in\s+',
+    )
+    if negative.search(content):
+        content = negative.sub(r"\1in ", content)
+        return content, True
+
     if new_field in content and f'"{new_field}"' in content:
         # Already asserts new_field.
         return content, False

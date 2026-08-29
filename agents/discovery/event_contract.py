@@ -121,6 +121,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     Returns a dict that validates as DiscoveryResult.
     """
     change_id: str = data["change_id"]
+    provider: str = data.get("provider", _PROVIDER)
     old_field: str = data.get("old_field", "customer_id")
 
     if "fixtures_root" in data:
@@ -134,7 +135,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     # Walk every component directory (excluding the provider itself)
     component_dirs = sorted(
         p for p in fixtures_root.iterdir()
-        if p.is_dir() and p.name != _PROVIDER
+        if p.is_dir() and p.name != provider
     )
 
     for component_dir in component_dirs:
@@ -175,7 +176,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
                 subject=component,
                 content={
                     "consumer": component,
-                    "provider": _PROVIDER,
+                    "provider": provider,
                     "field": old_field,
                     "detection_method": (
                         "AST: event[\"" + old_field + "\"] inside event-handler function"
@@ -189,7 +190,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
         dependencies.append(
             Dependency(
-                from_component=_PROVIDER,
+                from_component=provider,
                 to_component=component,
                 edge_type="event",
                 reason=(

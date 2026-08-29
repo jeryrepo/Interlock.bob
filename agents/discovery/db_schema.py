@@ -73,6 +73,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     Returns a dict that validates as DiscoveryResult.
     """
     change_id: str = data["change_id"]
+    provider: str = data.get("provider", _PROVIDER)
     old_field: str = data.get("old_field", "customer_id")
 
     if "fixtures_root" in data:
@@ -129,7 +130,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
                 subject=component,
                 content={
                     "component": component,
-                    "provider": _PROVIDER,
+                    "provider": provider,
                     "field": old_field,
                     "schema_files": [
                         p.relative_to(fixtures_root).as_posix()
@@ -148,7 +149,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
         dependencies.append(
             Dependency(
-                from_component=_PROVIDER,
+                from_component=provider,
                 to_component=component,
                 edge_type="db",
                 reason=(

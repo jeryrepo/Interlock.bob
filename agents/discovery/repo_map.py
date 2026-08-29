@@ -43,8 +43,20 @@ def _is_event_file(path: Path) -> bool:
 
 def _find_field_refs_in_python(source: str, field: str) -> list[int]:
     """
-    Return line numbers where `field` appears as a subscript key in the
-    AST of the given source code.  Returns an empty list on parse errors.
+    Return line numbers where `field` is referenced in the AST.
+
+    Three forms, because the symbol being migrated is not always a dict key:
+
+      x["field"]            subscript   -- a renamed data field
+      field(...)  / field   bare name   -- a renamed function or transport symbol
+      obj.field(...)        attribute   -- the same, reached through a module
+
+    The subscript form alone was enough while the only change kind was a field
+    rename. A webhook-to-pub/sub migration moves a *call*, so restricting
+    detection to subscripts made those consumers invisible to discovery and the
+    dependency graph came back empty.
+
+    Returns an empty list on parse errors.
     """
     try:
         tree = ast.parse(source)
@@ -59,6 +71,12 @@ def _find_field_refs_in_python(source: str, field: str) -> list[int]:
             and isinstance(node.slice, ast.Constant)
             and node.slice.value == field
         ):
+            lines.append(node.lineno)
+        # Bare identifier: field(...) or a reference to it
+        elif isinstance(node, ast.Name) and node.id == field:
+            lines.append(node.lineno)
+        # Attribute access: transport.field(...)
+        elif isinstance(node, ast.Attribute) and node.attr == field:
             lines.append(node.lineno)
 
     return sorted(set(lines))
@@ -155,6 +173,9 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     """
     change_id: str = data["change_id"]
     old_field: str = data.get("old_field", "customer_id")
+    # The provider comes from the change spec.  The literal default keeps
+    # legacy callers working; it is not a claim about which components exist.
+    provider: str = data.get("provider", "account-service")
 
     # Resolve fixtures_root
     if "fixtures_root" in data:
@@ -202,11 +223,15 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-        # Emit a dependency edge for each component that references the target field
-        if summary["field_refs"]:
+        # Emit a dependency edge for each component that references the target
+        # field -- except the provider itself.  The provider owning the field is
+        # not a dependency on itself, and emitting one puts a self-loop in the
+        # graph, which makes the planning agent's cycle check fail and puts the
+        # provider in its own required-consumer set.
+        if summary["field_refs"] and name != provider:
             dependencies.append(
                 Dependency(
-                    from_component="account-service",
+                    from_component=provider,
                     to_component=name,
                     edge_type="undocumented",
                     reason=(
