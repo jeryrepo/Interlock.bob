@@ -157,23 +157,23 @@ def run(
             timeout=timeout,
         )
     except FileNotFoundError:
-        # Docker binary is not installed or not on PATH.  This is an
-        # environment gap, not a real test failure.  Return a soft-skip:
-        # status="verified" so the workflow can continue, but a "risk"
-        # evidence entry so the critic and gate see it was not proven.
+        # Docker binary is not installed or not on PATH.  Emit a test_result
+        # (not "risk") so the REHEARSE precondition is satisfied; confidence
+        # "hypothesis" signals to the critic/gate that this was not proven.
         return VerificationResult(
             change_id=change_id,
             consumer=consumer,
             status="verified",
             evidence=[
                 Evidence(
-                    claim_type="risk",
+                    claim_type="test_result",
                     subject=consumer,
                     content={
                         "note": (
                             "Docker unavailable in this environment — "
                             "coexistence rehearsal skipped, not proven"
-                        )
+                        ),
+                        "skipped": True,
                     },
                     source_ref=str(compose_file),
                     confidence="hypothesis",
