@@ -4,12 +4,16 @@ tests/implementation/test_fixture_integration.py
 Integration tests that run against the REAL fixtures/ directories.
 
 Two categories:
-  A. State assertions — verify the real fixture files are in the correct
-     post-migration state (these pass or fail based on what the agents did).
 
-  B. Worktree integration — copy each fixture into a tmp_path git worktree
-     and re-run the agent from scratch to prove the full agent→fixture flow
-     works end-to-end in a reproducible, non-destructive way.
+  A. State assertions — verify the real fixture files are in the correct
+     pre-migration state (customer_id baseline; demo starts before migration).
+
+  B. Worktree integration — obtain actual committed pre-migration fixture
+     content from commit c4774c2, place that content into an isolated
+     temporary Git repo, run provider-patch/consumer-migration there, run
+     real pytest, and verify the resulting Git SHA and source changes.
+     These tests are non-destructive: the checked-out fixtures are never
+     touched.
 
 Category B tests are marked with pytest.mark.integration so they can be
 run separately with:
@@ -20,7 +24,6 @@ Category A run as normal tests (fast, no agent invocation).
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -41,6 +44,9 @@ CHECKOUT        = FIXTURES / "checkout"
 FRAUD           = FIXTURES / "fraud"
 ANALYTICS       = FIXTURES / "analytics-worker"
 
+# Commit that holds the real pre-migration fixture baseline
+BASELINE_COMMIT = "c4774c2"
+
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 CR = {
@@ -58,419 +64,418 @@ def _is_sha(s: str) -> bool:
     return bool(SHA_RE.fullmatch(s))
 
 
-def _sha_in_log(sha: str, fixture_subdir: str) -> bool:
-    """Return True if sha appears in git log touching fixture_subdir."""
+def _git_show(commit: str, path: str) -> str:
+    """Return the content of a file at a given commit from the main repo."""
     result = subprocess.run(
-        ["git", "log", "--format=%H", "--", fixture_subdir],
+        ["git", "show", f"{commit}:{path}"],
+        capture_output=True, text=True, encoding="utf-8", cwd=str(REPO_ROOT),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git show {commit}:{path} failed:\n{result.stderr}"
+        )
+    return result.stdout
+
+
+def _sha_in_log(fixture_subdir: str, pattern: str) -> bool:
+    """Return True if a commit with subject matching pattern exists for fixture_subdir."""
+    result = subprocess.run(
+        ["git", "log", "--format=%s", "--", fixture_subdir],
         capture_output=True, text=True, cwd=str(REPO_ROOT),
     )
-    return sha in result.stdout
+    return pattern in result.stdout
 
 
 # ===========================================================================
-# A. State assertions — real fixture files are in post-migration state
+# A. State assertions — real checked-out fixtures are in PRE-MIGRATION state
+# (customer_id baseline; demo starts before migration)
 # ===========================================================================
 
-class TestAccountServiceState:
-    """account-service must expose BOTH customer_id (retained) and account_id (added)."""
+class TestAccountServicePreMigrationState:
+    """account-service must be in customer_id-only baseline (pre-migration)."""
 
-    def test_app_py_has_account_id(self):
+    def test_app_py_has_customer_id(self):
         content = (ACCOUNT_SERVICE / "app.py").read_text()
-        assert "account_id" in content, "account_id must be present in app.py"
+        assert "customer_id" in content, "customer_id must be present in app.py (pre-migration)"
 
-    def test_app_py_retains_customer_id(self):
-        content = (ACCOUNT_SERVICE / "app.py").read_text()
-        assert "customer_id" in content, (
-            "customer_id must be RETAINED in app.py (dual-field compatibility window)"
-        )
+    def test_app_py_no_account_id_in_code(self):
+        content = (ACCOUNT_SERVICE / "app.py").read_text(encoding="utf-8")
+        # The docstring may mention "account_id" as a migration target; check
+        # that it does not appear as a Python identifier or dict key in code.
+        import ast
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            pytest.fail("app.py is not valid Python at pre-migration baseline")
+        # Walk the AST: no attribute/name node should be 'account_id'
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == "account_id":
+                pytest.fail("account_id appears as a code Name in app.py — must be pre-migration baseline")
+            if isinstance(node, ast.Attribute) and node.attr == "account_id":
+                pytest.fail("account_id appears as an Attribute in app.py — must be pre-migration baseline")
+            if isinstance(node, ast.Constant) and node.value == "account_id":
+                pytest.fail("account_id appears as a string constant in app.py — must be pre-migration baseline")
 
-    def test_openapi_has_account_id(self):
+    def test_openapi_has_customer_id(self):
         content = (ACCOUNT_SERVICE / "openapi.yaml").read_text()
-        assert "account_id" in content, "openapi.yaml must document account_id"
+        assert "customer_id" in content, "openapi.yaml must document customer_id (pre-migration)"
 
-    def test_openapi_retains_customer_id(self):
+    def test_openapi_no_account_id(self):
         content = (ACCOUNT_SERVICE / "openapi.yaml").read_text()
-        assert "customer_id" in content, "openapi.yaml must still document customer_id"
-
-    def test_provider_patch_commit_exists(self):
-        """A provider-patch commit must be in git log for fixtures/account-service/."""
-        result = subprocess.run(
-            ["git", "log", "--format=%s", "--", "fixtures/account-service/"],
-            capture_output=True, text=True, cwd=str(REPO_ROOT),
-        )
-        assert "provider-patch" in result.stdout, (
-            "A 'provider-patch' commit must appear in git log for account-service"
+        assert "account_id" not in content, (
+            "openapi.yaml must not document account_id — fixture must be pre-migration baseline"
         )
 
-    def test_tests_pass_after_migration(self):
-        """The real account-service test suite must pass post-migration."""
+    def test_provider_patch_commit_exists_in_history(self):
+        """The provider-patch migration commit must remain visible in git log history."""
+        assert _sha_in_log("fixtures/account-service/", "provider-patch"), (
+            "A 'provider-patch' commit must appear in git log for account-service history"
+        )
+
+    def test_pre_migration_tests_pass(self):
+        """The real account-service test suite must pass at the pre-migration baseline."""
         result = subprocess.run(
             ["python", "-m", "pytest", str(ACCOUNT_SERVICE), "-v", "--tb=short"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0, (
-            f"account-service tests must pass post-migration:\n{result.stdout[-2000:]}"
+            f"account-service tests must pass at pre-migration baseline:\n{result.stdout[-2000:]}"
         )
 
 
-class TestCheckoutState:
-    """checkout must use account_id exclusively (full migration)."""
+class TestCheckoutPreMigrationState:
+    """checkout must be in customer_id baseline (pre-migration)."""
 
-    def test_checkout_py_uses_account_id(self):
+    def test_checkout_py_uses_customer_id(self):
         content = (CHECKOUT / "checkout.py").read_text()
-        assert '"account_id"' in content, "checkout.py must use account_id key"
+        assert '"customer_id"' in content, "checkout.py must use customer_id key (pre-migration)"
 
-    def test_checkout_py_no_customer_id_key(self):
+    def test_checkout_py_no_account_id_key(self):
         content = (CHECKOUT / "checkout.py").read_text()
-        assert '"customer_id"' not in content, (
-            'checkout.py must not use "customer_id" key after migration'
+        assert '"account_id"' not in content, (
+            'checkout.py must not use "account_id" key — fixture must be pre-migration baseline'
         )
 
-    def test_consumer_migration_commit_exists(self):
-        result = subprocess.run(
-            ["git", "log", "--format=%s", "--", "fixtures/checkout/"],
-            capture_output=True, text=True, cwd=str(REPO_ROOT),
-        )
-        assert "consumer-migration(checkout)" in result.stdout, (
-            "A consumer-migration(checkout) commit must appear in git log"
+    def test_consumer_migration_commit_exists_in_history(self):
+        assert _sha_in_log("fixtures/checkout/", "consumer-migration(checkout)"), (
+            "A consumer-migration(checkout) commit must appear in git log history"
         )
 
-    def test_tests_pass_after_migration(self):
+    def test_pre_migration_tests_pass(self):
         result = subprocess.run(
             ["python", "-m", "pytest", str(CHECKOUT), "-v", "--tb=short"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0, (
-            f"checkout tests must pass post-migration:\n{result.stdout[-2000:]}"
+            f"checkout tests must pass at pre-migration baseline:\n{result.stdout[-2000:]}"
         )
 
 
-class TestFraudState:
-    """fraud must use account_id exclusively."""
+class TestFraudPreMigrationState:
+    """fraud must be in customer_id baseline (pre-migration)."""
 
-    def test_fraud_py_uses_account_id(self):
+    def test_fraud_py_uses_customer_id(self):
         content = (FRAUD / "fraud.py").read_text()
-        assert "account_id" in content, "fraud.py must use account_id"
+        assert '"customer_id"' in content, "fraud.py must use customer_id (pre-migration)"
 
-    def test_fraud_py_no_customer_id_key(self):
+    def test_fraud_py_no_account_id_key(self):
         content = (FRAUD / "fraud.py").read_text()
-        assert '"customer_id"' not in content, (
-            'fraud.py must not use "customer_id" key after migration'
+        assert '"account_id"' not in content, (
+            'fraud.py must not use "account_id" key — fixture must be pre-migration baseline'
         )
 
-    def test_consumer_migration_commit_exists(self):
-        result = subprocess.run(
-            ["git", "log", "--format=%s", "--", "fixtures/fraud/"],
-            capture_output=True, text=True, cwd=str(REPO_ROOT),
+    def test_consumer_migration_commit_exists_in_history(self):
+        assert _sha_in_log("fixtures/fraud/", "consumer-migration(fraud)"), (
+            "A consumer-migration(fraud) commit must appear in git log history"
         )
-        assert "consumer-migration(fraud)" in result.stdout
 
-    def test_tests_pass_after_migration(self):
+    def test_pre_migration_tests_pass(self):
         result = subprocess.run(
             ["python", "-m", "pytest", str(FRAUD), "-v", "--tb=short"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0, (
-            f"fraud tests must pass post-migration:\n{result.stdout[-2000:]}"
+            f"fraud tests must pass at pre-migration baseline:\n{result.stdout[-2000:]}"
         )
 
 
-class TestAnalyticsWorkerState:
-    """analytics-worker must use event["account_id"] — the canonical undocumented pattern."""
+class TestAnalyticsWorkerPreMigrationState:
+    """analytics-worker must use event["customer_id"] — pre-migration baseline."""
 
-    def test_worker_py_uses_event_account_id(self):
+    def test_worker_py_uses_event_customer_id(self):
         content = (ANALYTICS / "worker.py").read_text()
-        assert 'event["account_id"]' in content, (
-            'worker.py must use event["account_id"] after migration'
+        assert 'event["customer_id"]' in content, (
+            'worker.py must use event["customer_id"] (pre-migration baseline)'
         )
 
-    def test_worker_py_no_event_customer_id(self):
+    def test_worker_py_no_event_account_id(self):
         content = (ANALYTICS / "worker.py").read_text()
-        assert 'event["customer_id"]' not in content, (
-            'event["customer_id"] must be gone from worker.py'
+        assert 'event["account_id"]' not in content, (
+            'event["account_id"] must not be in worker.py — fixture must be pre-migration baseline'
         )
 
-    def test_consumer_migration_commit_exists(self):
-        result = subprocess.run(
-            ["git", "log", "--format=%s", "--", "fixtures/analytics-worker/"],
-            capture_output=True, text=True, cwd=str(REPO_ROOT),
+    def test_worker_py_no_discovery_giveaway_text(self):
+        """Analytics worker must not contain comments that hint at hidden/undocumented dependency."""
+        content = (ANALYTICS / "worker.py").read_text()
+        assert "undocumented" not in content, (
+            "worker.py must not contain 'undocumented' discovery-giveaway text"
         )
-        assert "consumer-migration(analytics-worker)" in result.stdout
+        assert "Discovery agents must find" not in content, (
+            "worker.py must not contain instructions directing a Discovery agent"
+        )
+        assert "never listed in an API contract" not in content, (
+            "worker.py must not contain discovery-hint text"
+        )
 
-    def test_tests_pass_after_migration(self):
+    def test_consumer_migration_commit_exists_in_history(self):
+        assert _sha_in_log("fixtures/analytics-worker/", "consumer-migration(analytics-worker)"), (
+            "A consumer-migration(analytics-worker) commit must appear in git log history"
+        )
+
+    def test_pre_migration_tests_pass(self):
         result = subprocess.run(
             ["python", "-m", "pytest", str(ANALYTICS), "-v", "--tb=short"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0, (
-            f"analytics-worker tests must pass post-migration:\n{result.stdout[-2000:]}"
+            f"analytics-worker tests must pass at pre-migration baseline:\n{result.stdout[-2000:]}"
         )
 
 
 # ===========================================================================
 # B. Worktree integration tests — reproducible end-to-end agent invocations
-# Uses tmp_path copies of the PRE-MIGRATION fixture baseline so the tests
-# are idempotent.
+#
+# Obtains actual committed pre-migration fixture content from commit c4774c2,
+# places that content into an isolated temporary Git repo, runs the agent,
+# runs real pytest, and verifies the resulting Git SHA and source changes.
+# Never modifies the checked-out fixtures.
 # ===========================================================================
 
-def _make_worktree(src: Path, dest: Path) -> None:
-    """Copy src into dest, git-init it with local identity, and initial-commit."""
-    shutil.copytree(str(src), str(dest))
-    subprocess.run(["git", "init"], capture_output=True, cwd=str(dest))
+def _init_worktree(dest: Path) -> None:
+    """Initialise a fresh git repo with local identity at dest."""
+    subprocess.run(["git", "init"], capture_output=True, cwd=str(dest), check=True)
     subprocess.run(
         ["git", "config", "user.email", "test@interlock.dev"],
-        capture_output=True, cwd=str(dest),
+        capture_output=True, cwd=str(dest), check=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Interlock Test"],
-        capture_output=True, cwd=str(dest),
+        capture_output=True, cwd=str(dest), check=True,
     )
-    subprocess.run(["git", "add", "."], capture_output=True, cwd=str(dest))
+
+
+def _write_and_commit(dest: Path, files: dict[str, str], message: str) -> str:
+    """Write files into dest, stage, and commit. Returns the commit SHA."""
+    for rel_path, content in files.items():
+        target = dest / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "add", "."], capture_output=True, cwd=str(dest), check=True)
     subprocess.run(
-        ["git", "commit", "-m", "baseline-copy"],
-        capture_output=True, cwd=str(dest),
+        ["git", "commit", "-m", message],
+        capture_output=True, cwd=str(dest), check=True,
     )
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True, text=True, cwd=str(dest), check=True,
+    )
+    return result.stdout.strip()
 
 
-def _revert_to_baseline(src_file_content: str, dest_file: Path) -> None:
-    """Write pre-migration content back into a file in the worktree."""
-    dest_file.write_text(src_file_content, encoding="utf-8")
+def _build_account_service_worktree(dest: Path) -> str:
+    """
+    Populate dest with real pre-migration account-service content from c4774c2.
+    Returns the baseline commit SHA.
+    """
+    _init_worktree(dest)
+    files = {
+        "conftest.py":           _git_show(BASELINE_COMMIT, "fixtures/account-service/conftest.py"),
+        "app.py":                _git_show(BASELINE_COMMIT, "fixtures/account-service/app.py"),
+        "openapi.yaml":          _git_show(BASELINE_COMMIT, "fixtures/account-service/openapi.yaml"),
+        "tests/__init__.py":     _git_show(BASELINE_COMMIT, "fixtures/account-service/tests/__init__.py"),
+        "tests/test_app.py":     _git_show(BASELINE_COMMIT, "fixtures/account-service/tests/test_app.py"),
+    }
+    return _write_and_commit(dest, files, "baseline: real pre-migration account-service from c4774c2")
+
+
+def _build_checkout_worktree(dest: Path) -> str:
+    """
+    Populate dest with real pre-migration checkout content from c4774c2.
+    Returns the baseline commit SHA.
+    """
+    _init_worktree(dest)
+    files = {
+        "conftest.py":              _git_show(BASELINE_COMMIT, "fixtures/checkout/conftest.py"),
+        "checkout.py":              _git_show(BASELINE_COMMIT, "fixtures/checkout/checkout.py"),
+        "tests/__init__.py":        _git_show(BASELINE_COMMIT, "fixtures/checkout/tests/__init__.py"),
+        "tests/test_checkout.py":   _git_show(BASELINE_COMMIT, "fixtures/checkout/tests/test_checkout.py"),
+    }
+    return _write_and_commit(dest, files, "baseline: real pre-migration checkout from c4774c2")
+
+
+def _build_analytics_worktree(dest: Path) -> str:
+    """
+    Populate dest with real pre-migration analytics-worker content from c4774c2.
+    Returns the baseline commit SHA.
+    """
+    _init_worktree(dest)
+    files = {
+        "conftest.py":               _git_show(BASELINE_COMMIT, "fixtures/analytics-worker/conftest.py"),
+        "worker.py":                 _git_show(BASELINE_COMMIT, "fixtures/analytics-worker/worker.py"),
+        "tests/__init__.py":         _git_show(BASELINE_COMMIT, "fixtures/analytics-worker/tests/__init__.py"),
+        "tests/test_worker.py":      _git_show(BASELINE_COMMIT, "fixtures/analytics-worker/tests/test_worker.py"),
+    }
+    return _write_and_commit(dest, files, "baseline: real pre-migration analytics-worker from c4774c2")
 
 
 @pytest.mark.integration
 class TestProviderPatchWorktreeIntegration:
-    """Run provider-patch against a fresh copy of the account-service fixture."""
+    """
+    Run provider-patch against a worktree populated with the REAL committed
+    pre-migration account-service content from c4774c2.
+    """
 
-    def test_provider_patch_on_fixture_structure(self, tmp_path: Path):
+    def test_provider_patch_on_real_fixture_content(self, tmp_path: Path):
         """
-        provider-patch must succeed when run against a directory that matches
-        the real fixtures/account-service/ structure.
+        provider-patch must succeed on the exact content committed at c4774c2.
         """
         dest = tmp_path / "account-service"
-
-        # Build a fresh pre-migration baseline matching the fixture structure
-        import textwrap
         dest.mkdir()
-        subprocess.run(["git", "init"], capture_output=True, cwd=str(dest))
-        subprocess.run(
-            ["git", "config", "user.email", "test@interlock.dev"],
-            capture_output=True, cwd=str(dest),
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Interlock Test"],
-            capture_output=True, cwd=str(dest),
-        )
-
-        (dest / "conftest.py").write_text(
-            "import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).parent))\n"
-        )
-        (dest / "app.py").write_text(textwrap.dedent("""\
-            from typing import Optional
-
-            class AccountResponse:
-                customer_id: Optional[str] = None
-
-                def __init__(self, customer_id: str):
-                    self.customer_id = customer_id
-
-                def to_dict(self) -> dict:
-                    return {
-                        "customer_id": self.customer_id,
-                    }
-
-            def get_account(customer_id: str) -> dict:
-                return AccountResponse(customer_id=customer_id).to_dict()
-        """))
-        (dest / "openapi.yaml").write_text(textwrap.dedent("""\
-            openapi: "3.0.0"
-            info:
-              title: Account Service
-              version: "1.0"
-            paths:
-              /accounts/{id}:
-                get:
-                  responses:
-                    "200":
-                      content:
-                        application/json:
-                          schema:
-                            type: object
-                            properties:
-                              customer_id:
-                                type: string
-        """))
-        tests_dir = dest / "tests"
-        tests_dir.mkdir()
-        (tests_dir / "__init__.py").write_text("")
-        (tests_dir / "test_app.py").write_text(textwrap.dedent("""\
-            from app import get_account
-            def test_get_account():
-                r = get_account("c-1")
-                assert "customer_id" in r
-        """))
-
-        subprocess.run(["git", "add", "."], capture_output=True, cwd=str(dest))
-        subprocess.run(
-            ["git", "commit", "-m", "baseline"],
-            capture_output=True, cwd=str(dest),
-        )
+        baseline_sha = _build_account_service_worktree(dest)
 
         result = patch_run(CR, dest)
 
-        assert result["status"] == "success"
-        assert _is_sha(result["commit_sha"])
-        assert "account_id" in (dest / "app.py").read_text()
-        assert "customer_id" in (dest / "app.py").read_text()  # retained
-        assert "account_id" in (dest / "openapi.yaml").read_text()
+        assert result["status"] == "success", f"provider-patch failed: {result}"
+        assert _is_sha(result["commit_sha"]), f"Expected 40-char hex SHA, got: {result['commit_sha']}"
+        # New field must be introduced
+        app_content = (dest / "app.py").read_text(encoding="utf-8")
+        assert "account_id" in app_content, "account_id must be present after provider-patch"
+        # Old field must be retained (dual-field window)
+        assert "customer_id" in app_content, "customer_id must be retained after provider-patch"
+        # OpenAPI must document the new field
+        assert "account_id" in (dest / "openapi.yaml").read_text(encoding="utf-8")
+        # Resulting SHA must be different from (i.e., newer than) baseline
+        assert result["commit_sha"] != baseline_sha, (
+            "provider-patch commit SHA must differ from pre-migration baseline SHA"
+        )
 
     def test_provider_patch_commit_sha_verified_in_worktree(self, tmp_path: Path):
         """SHA returned by provider-patch must exist as a git object in the worktree."""
-        import textwrap
-        dest = tmp_path / "acct-svc"
+        dest = tmp_path / "account-service"
         dest.mkdir()
-        subprocess.run(["git", "init"], capture_output=True, cwd=str(dest))
-        subprocess.run(
-            ["git", "config", "user.email", "t@t.dev"], capture_output=True, cwd=str(dest)
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "T"], capture_output=True, cwd=str(dest)
-        )
-        (dest / "conftest.py").write_text(
-            "import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).parent))\n"
-        )
-        (dest / "app.py").write_text(
-            "class M:\n    customer_id: str = ''\ndef get(c): return {'customer_id': c}\n"
-        )
-        tests = dest / "tests"
-        tests.mkdir()
-        (tests / "__init__.py").write_text("")
-        (tests / "test_m.py").write_text(
-            "from app import get\ndef test_m(): assert 'customer_id' in get('x')\n"
-        )
-        subprocess.run(["git", "add", "."], capture_output=True, cwd=str(dest))
-        subprocess.run(["git", "commit", "-m", "b"], capture_output=True, cwd=str(dest))
+        _build_account_service_worktree(dest)
 
         result = patch_run(CR, dest)
         sha = result["commit_sha"]
+
         verify = subprocess.run(
             ["git", "-C", str(dest), "cat-file", "-e", sha], capture_output=True
         )
-        assert verify.returncode == 0, f"SHA {sha} does not exist in worktree"
+        assert verify.returncode == 0, f"SHA {sha} does not exist as a git object in worktree"
+
+    def test_provider_patch_git_log_shows_patch_commit(self, tmp_path: Path):
+        """git log in the worktree must show a provider-patch commit after the agent runs."""
+        dest = tmp_path / "account-service"
+        dest.mkdir()
+        _build_account_service_worktree(dest)
+
+        patch_run(CR, dest)
+
+        log = subprocess.run(
+            ["git", "-C", str(dest), "log", "--format=%s"],
+            capture_output=True, text=True,
+        )
+        assert "provider-patch" in log.stdout, (
+            "git log in worktree must contain a provider-patch commit"
+        )
 
 
 @pytest.mark.integration
 class TestConsumerMigrationWorktreeIntegration:
-    """Run consumer-migration against fresh copies matching the real fixture structure."""
+    """
+    Run consumer-migration against worktrees populated with the REAL committed
+    pre-migration fixture content from c4774c2.
+    """
 
-    def _checkout_baseline(self, dest: Path) -> None:
-        import textwrap
-        dest.mkdir()
-        subprocess.run(["git", "init"], capture_output=True, cwd=str(dest))
-        subprocess.run(
-            ["git", "config", "user.email", "t@t.dev"], capture_output=True, cwd=str(dest)
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "T"], capture_output=True, cwd=str(dest)
-        )
-        (dest / "conftest.py").write_text(
-            "import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).parent))\n"
-        )
-        (dest / "checkout.py").write_text(textwrap.dedent("""\
-            def process_order(resp: dict, item: str) -> dict:
-                cid = resp["customer_id"]
-                return {"order_customer": cid, "item": item, "status": "pending"}
-        """))
-        tests = dest / "tests"
-        tests.mkdir()
-        (tests / "__init__.py").write_text("")
-        (tests / "test_checkout.py").write_text(textwrap.dedent("""\
-            from checkout import process_order
-            def test_order():
-                r = process_order({"customer_id": "c-1"}, "widget")
-                assert r["order_customer"] == "c-1"
-        """))
-        subprocess.run(["git", "add", "."], capture_output=True, cwd=str(dest))
-        subprocess.run(["git", "commit", "-m", "baseline"], capture_output=True, cwd=str(dest))
-
-    def _analytics_baseline(self, dest: Path) -> None:
-        import textwrap
-        dest.mkdir()
-        subprocess.run(["git", "init"], capture_output=True, cwd=str(dest))
-        subprocess.run(
-            ["git", "config", "user.email", "t@t.dev"], capture_output=True, cwd=str(dest)
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "T"], capture_output=True, cwd=str(dest)
-        )
-        (dest / "conftest.py").write_text(
-            "import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).parent))\n"
-        )
-        (dest / "worker.py").write_text(textwrap.dedent("""\
-            def process_event(event: dict) -> dict:
-                cid = event["customer_id"]
-                return {"processed_for": cid, "metadata": {"customer_id": cid}}
-        """))
-        tests = dest / "tests"
-        tests.mkdir()
-        (tests / "__init__.py").write_text("")
-        (tests / "test_worker.py").write_text(textwrap.dedent("""\
-            from worker import process_event
-            def test_event():
-                r = process_event({"customer_id": "c-1", "type": "buy"})
-                assert r["processed_for"] == "c-1"
-        """))
-        subprocess.run(["git", "add", "."], capture_output=True, cwd=str(dest))
-        subprocess.run(["git", "commit", "-m", "baseline"], capture_output=True, cwd=str(dest))
-
-    def test_checkout_migration_on_fixture_structure(self, tmp_path: Path):
+    def test_checkout_migration_on_real_fixture_content(self, tmp_path: Path):
+        """
+        consumer-migration(checkout) must succeed on the exact content committed at c4774c2.
+        """
         dest = tmp_path / "checkout"
-        self._checkout_baseline(dest)
+        dest.mkdir()
+        baseline_sha = _build_checkout_worktree(dest)
 
         result = migrate_run({**CR, "consumer": "checkout"}, dest)
 
-        assert result["status"] == "success"
-        assert _is_sha(result["commit_sha"])
-        src = (dest / "checkout.py").read_text()
-        assert '"account_id"' in src
-        assert '"customer_id"' not in src
+        assert result["status"] == "success", f"migrate_run failed: {result}"
+        assert _is_sha(result["commit_sha"]), f"Expected 40-char hex SHA, got: {result['commit_sha']}"
+        src = (dest / "checkout.py").read_text(encoding="utf-8")
+        assert '"account_id"' in src, "checkout.py must use account_id after migration"
+        assert '"customer_id"' not in src, "checkout.py must not retain customer_id key after migration"
+        assert result["commit_sha"] != baseline_sha
 
-    def test_analytics_event_key_replaced_in_fixture_structure(self, tmp_path: Path):
+    def test_analytics_event_key_replaced_on_real_fixture_content(self, tmp_path: Path):
         """
-        The canonical discovery-demo migration: event['customer_id']
-        must become event['account_id'] in a real fixture-structured repo.
+        The canonical discovery-demo migration: event["customer_id"]
+        must become event["account_id"] when run against the real c4774c2 content.
         """
         dest = tmp_path / "analytics-worker"
-        self._analytics_baseline(dest)
+        dest.mkdir()
+        baseline_sha = _build_analytics_worktree(dest)
 
         result = migrate_run({**CR, "consumer": "analytics-worker"}, dest)
 
-        assert result["status"] == "success"
-        src = (dest / "worker.py").read_text()
-        assert 'event["account_id"]' in src
-        assert 'event["customer_id"]' not in src
+        assert result["status"] == "success", f"migrate_run failed: {result}"
+        src = (dest / "worker.py").read_text(encoding="utf-8")
+        assert 'event["account_id"]' in src, "worker.py must use event[account_id] after migration"
+        assert 'event["customer_id"]' not in src, "worker.py must not retain event[customer_id] after migration"
+        assert result["commit_sha"] != baseline_sha
 
-    def test_checkout_and_analytics_distinct_shas(self, tmp_path: Path):
+    def test_checkout_and_analytics_produce_distinct_shas(self, tmp_path: Path):
+        """Running migration on two separate worktrees yields two different SHAs."""
         dest_c = tmp_path / "checkout"
         dest_a = tmp_path / "analytics-worker"
-        self._checkout_baseline(dest_c)
-        self._analytics_baseline(dest_a)
+        dest_c.mkdir()
+        dest_a.mkdir()
+        _build_checkout_worktree(dest_c)
+        _build_analytics_worktree(dest_a)
 
         r_c = migrate_run({**CR, "consumer": "checkout"}, dest_c)
         r_a = migrate_run({**CR, "consumer": "analytics-worker"}, dest_a)
 
-        assert r_c["commit_sha"] != r_a["commit_sha"]
+        assert r_c["commit_sha"] != r_a["commit_sha"], (
+            "Two independent migration runs must produce distinct commit SHAs"
+        )
 
-    def test_migration_scoped_to_fixture_path(self, tmp_path: Path):
-        """Migrating checkout must not touch analytics-worker, even if both are under tmp_path."""
+    def test_migration_scoped_to_worktree_path(self, tmp_path: Path):
+        """Migrating checkout worktree must not touch the analytics-worker worktree."""
         dest_c = tmp_path / "checkout"
         dest_a = tmp_path / "analytics-worker"
-        self._checkout_baseline(dest_c)
-        self._analytics_baseline(dest_a)
+        dest_c.mkdir()
+        dest_a.mkdir()
+        _build_checkout_worktree(dest_c)
+        _build_analytics_worktree(dest_a)
 
-        analytics_before = (dest_a / "worker.py").read_text()
+        analytics_before = (dest_a / "worker.py").read_text(encoding="utf-8")
         migrate_run({**CR, "consumer": "checkout"}, dest_c)
-        analytics_after = (dest_a / "worker.py").read_text()
+        analytics_after = (dest_a / "worker.py").read_text(encoding="utf-8")
 
         assert analytics_before == analytics_after, (
-            "Migrating checkout must not modify analytics-worker/worker.py"
+            "Migrating checkout worktree must not modify analytics-worker/worker.py"
+        )
+
+    def test_checkout_migration_git_log_shows_migration_commit(self, tmp_path: Path):
+        """git log in the worktree must show a consumer-migration commit after the agent runs."""
+        dest = tmp_path / "checkout"
+        dest.mkdir()
+        _build_checkout_worktree(dest)
+
+        migrate_run({**CR, "consumer": "checkout"}, dest)
+
+        log = subprocess.run(
+            ["git", "-C", str(dest), "log", "--format=%s"],
+            capture_output=True, text=True,
+        )
+        assert "consumer-migration(checkout)" in log.stdout, (
+            "git log in worktree must contain a consumer-migration(checkout) commit"
         )
