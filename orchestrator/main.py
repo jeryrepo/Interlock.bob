@@ -270,3 +270,107 @@ def approve_change_request(change_id: str, body: ApproveRequest):
         **approval,
         new_status=new_state,
     )
+
+
+# ---------------------------------------------------------------------------
+# Read-only projections
+# ---------------------------------------------------------------------------
+# These endpoints expose ledger state that is already computed by the
+# orchestrator so that clients (e.g. the Streamlit UI) never need to
+# re-implement gate logic or read SQLite directly.  They are additive and
+# side-effect free.
+
+
+class ConsumerMigrationItem(BaseModel):
+    consumer: str
+    status: str
+    updated_at: str
+
+
+class GateStatusResponse(BaseModel):
+    change_id: str
+    state: str
+    decided: bool
+    result: str
+    reason: str
+    decided_at: str | None
+    required_consumers: list[str]
+    unresolved: list[str]
+    consumers: list[ConsumerMigrationItem]
+
+
+class ApprovalItem(BaseModel):
+    id: str
+    change_id: str
+    gate: str
+    approved_by: str
+    approved_at: str
+
+
+class ApprovalListResponse(BaseModel):
+    change_id: str
+    approvals: list[ApprovalItem]
+
+
+@app.get("/change-requests/{change_id}/gate", response_model=GateStatusResponse)
+def get_gate_status(change_id: str):
+    """
+    Return the deterministic safety gate status for a change request.
+
+    If the orchestrator has already written a gate_decision row, that recorded
+    decision is returned verbatim and ``decided`` is True.  Before the workflow
+    reaches GATE_DECISION no row exists yet, so a live read-only
+    ``evaluate_gate()`` preview is returned with ``decided`` False — this lets a
+    UI show which consumers are still outstanding without duplicating gate
+    logic, while never presenting a preview as a final decision.
+    """
+    conn = _get_conn()
+    row = ledger.get_change(conn, change_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Change '{change_id}' not found.")
+
+    live = evaluate_gate(conn, change_id)
+    recorded = ledger.get_latest_gate_decision(conn, change_id)
+
+    migrations = [
+        ConsumerMigrationItem(
+            consumer=m["consumer"],
+            status=m["status"],
+            updated_at=m["updated_at"],
+        )
+        for m in ledger.get_consumer_migrations(conn, change_id)
+    ]
+
+    if recorded is not None:
+        result = recorded["result"]
+        reason = recorded["reason"]
+        decided_at = recorded["decided_at"]
+    else:
+        result = live.result
+        reason = live.reason
+        decided_at = None
+
+    return GateStatusResponse(
+        change_id=change_id,
+        state=row["status"],
+        decided=recorded is not None,
+        result=result,
+        reason=reason,
+        decided_at=decided_at,
+        required_consumers=live.required_consumers,
+        unresolved=live.unresolved,
+        consumers=migrations,
+    )
+
+
+@app.get("/change-requests/{change_id}/approvals", response_model=ApprovalListResponse)
+def get_approvals(change_id: str):
+    """Return all human approvals recorded for a change request."""
+    conn = _get_conn()
+    if ledger.get_change(conn, change_id) is None:
+        raise HTTPException(status_code=404, detail=f"Change '{change_id}' not found.")
+    rows = ledger.get_approvals(conn, change_id)
+    return ApprovalListResponse(
+        change_id=change_id,
+        approvals=[ApprovalItem(**r) for r in rows],
+    )
