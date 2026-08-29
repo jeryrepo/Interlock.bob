@@ -7,6 +7,12 @@ Walks every repository under fixtures_root and produces a structured
 inventory of components, source files, OpenAPI specs, schema/migration
 files, and field references.
 
+Canonical edge direction:
+  from_component = consumer  (the component that references the field)
+  to_component   = provider  (the component that owns/exposes the field)
+
+e.g. checkout -> account-service  (checkout depends on account-service)
+
 Returns a dict that validates as DiscoveryResult.
 Does NOT write to the database directly.
 Does NOT call other agents.
@@ -202,12 +208,16 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-        # Emit a dependency edge for each component that references the target field
-        if summary["field_refs"]:
+        # Emit a dependency edge for each component that references the target field.
+        # Canonical direction: consumer -> provider.
+        # Skip self-edges: account-service owns the field, so finding customer_id
+        # references inside account-service itself is expected and must never be
+        # recorded as a dependency of account-service on itself.
+        if summary["field_refs"] and name != "account-service":
             dependencies.append(
                 Dependency(
-                    from_component="account-service",
-                    to_component=name,
+                    from_component=name,
+                    to_component="account-service",
                     edge_type="undocumented",
                     reason=(
                         f"Source inspection found {len(summary['field_refs'])} "

@@ -1,7 +1,6 @@
-"""Tests for account-service (pre-migration baseline).
+﻿"""Tests for account-service.
 
-These tests operate on the PRE-migration state: responses contain only
-customer_id. After migration, account_id will also be present.
+Structural tests that hold regardless of migration state.
 """
 from app import get_account
 
@@ -14,9 +13,3 @@ def test_get_account_returns_customer_id():
 def test_get_account_value_matches_input():
     result = get_account("cust-abc")
     assert result["customer_id"] == "cust-abc"
-
-
-def test_get_account_no_account_id_pre_migration():
-    """Pre-migration: account_id is NOT yet in the response."""
-    result = get_account("cust-xyz")
-    assert "account_id" not in result

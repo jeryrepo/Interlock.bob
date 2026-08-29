@@ -38,11 +38,11 @@ class TestAnalyticsWorkerDiscovered:
     def test_finds_analytics_worker_as_event_consumer(self, event_dependencies):
         """
         analytics-worker must appear as an event consumer with edge_type='event'.
-        This is the critical undocumented dependency that must be found from source.
+        Canonical direction: from_component=analytics-worker, to_component=account-service.
         """
         event_edges = [
             d for d in event_dependencies
-            if d["to_component"] == "analytics-worker"
+            if d["from_component"] == "analytics-worker"
             and d["edge_type"] == "event"
         ]
         assert event_edges, (
@@ -52,18 +52,18 @@ class TestAnalyticsWorkerDiscovered:
         )
 
     def test_provider_is_account_service(self, event_dependencies):
-        """The event edge must originate from account-service."""
+        """All event edges must terminate at account-service (to_component)."""
         event_edges = [
             d for d in event_dependencies if d["edge_type"] == "event"
         ]
         assert event_edges, "No event-type dependencies found at all"
         for edge in event_edges:
-            assert edge["from_component"] == "account-service"
+            assert edge["to_component"] == "account-service"
 
     def test_only_analytics_worker_is_event_consumer(self, event_dependencies):
         """checkout and fraud must NOT be classified as event consumers."""
         event_consumers = {
-            d["to_component"]
+            d["from_component"]
             for d in event_dependencies
             if d["edge_type"] == "event"
         }
@@ -181,7 +181,7 @@ class TestEventRegressionRemoval:
         assert not event_deps, (
             f"Regression failure: removing event[\"customer_id\"] from "
             f"worker.py should produce zero event dependencies, "
-            f"but found: {[d['to_component'] for d in event_deps]}"
+            f"but found: {[d['from_component'] for d in event_deps]}"
         )
 
     def test_original_fixture_is_not_mutated(self, fixtures_root):

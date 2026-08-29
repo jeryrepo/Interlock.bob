@@ -4,12 +4,12 @@ Shared mock-data builders for tests/planning/.
 All inputs are plain dicts matching the shared contract shapes from
 docs/prompts/00_SHARED_TEAM_CONTRACT.md — no Pydantic imports.
 
-Canonical edge direction (00_SHARED_TEAM_CONTRACT.md):
-  from_component = provider  (the node that exposes the changing field)
-  to_component   = consumer  (the node that depends on the field)
+Canonical edge direction:
+  from_component = consumer  (the node that depends on the changing field)
+  to_component   = provider  (the node that exposes the field)
 
-Example: account-service -> checkout
-  dep("account-service", "checkout", "api")
+Example: checkout -> account-service
+  dep("checkout", "account-service", "api")
 
 Literal value sets (from contract):
   edge_type  : "api" | "event" | "db" | "undocumented"
@@ -66,14 +66,14 @@ def three_consumer_input():
     """
     account-service is the provider.
     Three consumers: svc-a (api), svc-b (event), svc-c (undocumented).
-    Canonical edges: account-service -> svc-a / svc-b / svc-c
+    Canonical edges: svc-a / svc-b / svc-c -> account-service
     No db consumers. No hardcoded Interlock names.
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("account-service", "svc-a", "api"),
-        dep("account-service", "svc-b", "event"),
-        dep("account-service", "svc-c", "undocumented"),
+        dep("svc-a", "account-service", "api"),
+        dep("svc-b", "account-service", "event"),
+        dep("svc-c", "account-service", "undocumented"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -82,13 +82,13 @@ def three_consumer_input():
 def with_db_consumer_input():
     """
     Two api/event consumers + one db consumer (should be sorted last).
-    Canonical edges: account-service -> svc-a / svc-b / platform-cfg
+    Canonical edges: svc-a / svc-b / platform-cfg -> account-service
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("account-service", "svc-a", "api"),
-        dep("account-service", "svc-b", "event"),
-        dep("account-service", "platform-cfg", "db"),
+        dep("svc-a",        "account-service", "api"),
+        dep("svc-b",        "account-service", "event"),
+        dep("platform-cfg", "account-service", "db"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -97,13 +97,13 @@ def with_db_consumer_input():
 def unrelated_component_input():
     """
     svc-a is a consumer of account-service.
-    svc-x is a consumer of some-other-service only (no path from account-service).
-    Canonical edges: account-service -> svc-a, some-other-service -> svc-x
+    svc-x is a consumer of some-other-service only (no path to account-service).
+    Canonical edges: svc-a -> account-service, svc-x -> some-other-service
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("account-service",    "svc-a", "api"),
-        dep("some-other-service", "svc-x", "api"),
+        dep("svc-a", "account-service",    "api"),
+        dep("svc-x", "some-other-service", "api"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -111,12 +111,12 @@ def unrelated_component_input():
 @pytest.fixture
 def cyclic_input():
     """
-    account-service -> svc-a -> account-service creates a cycle.
+    svc-a -> account-service -> svc-a creates a cycle.
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("account-service", "svc-a", "api"),
-        dep("svc-a", "account-service", "api"),   # cycle back
+        dep("svc-a",          "account-service", "api"),
+        dep("account-service", "svc-a",          "api"),   # cycle back
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -126,12 +126,12 @@ def no_analytics_worker_input():
     """
     Graph deliberately contains NO analytics-worker node.
     Used to prove strategy does not hardcode that name.
-    Canonical edges: account-service -> svc-alpha / svc-beta
+    Canonical edges: svc-alpha / svc-beta -> account-service
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("account-service", "svc-alpha", "api"),
-        dep("account-service", "svc-beta",  "event"),
+        dep("svc-alpha", "account-service", "api"),
+        dep("svc-beta",  "account-service", "event"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -140,7 +140,7 @@ def no_analytics_worker_input():
 def arbitrary_names_input():
     """
     Entirely arbitrary service names — would break any hardcoding immediately.
-    Canonical edges: zeta-core -> omega-ui / gamma-worker / delta-cfg
+    Canonical edges: omega-ui / gamma-worker / delta-cfg -> zeta-core
     """
     cr = make_cr(
         provider="zeta-core",
@@ -148,9 +148,9 @@ def arbitrary_names_input():
         new_field="modern_ref",
     )
     deps = [
-        dep("zeta-core", "omega-ui",     "api"),
-        dep("zeta-core", "gamma-worker", "event"),
-        dep("zeta-core", "delta-cfg",    "db"),
+        dep("omega-ui",     "zeta-core", "api"),
+        dep("gamma-worker", "zeta-core", "event"),
+        dep("delta-cfg",    "zeta-core", "db"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -158,22 +158,19 @@ def arbitrary_names_input():
 @pytest.fixture
 def no_consumers_input():
     """
-    Provider exists but has no downstream consumers.
-    Canonical edges point FROM provider TO consumer; to have no consumers,
-    we only supply an edge whose to_component IS the provider (i.e., something
-    upstream of the provider). No edge departs from account-service, so
-    nx.descendants(g, "account-service") is empty.
+    Provider exists but has no consumers pointing to it.
+    Canonical edges: consumer -> provider.
+    Here we supply an edge pointing FROM account-service TO some-other-svc,
+    so account-service exists as a graph node but has no edges pointing TO it,
+    meaning nx.ancestors(g, "account-service") returns an empty set.
     """
     cr = make_cr(provider="account-service")
     deps = [
-        # This edge has account-service as to_component (the receiving end).
-        # Under the canonical convention from_component is the provider/source and
-        # to_component is the consumer/destination. Here some-upstream-svc is the
-        # source and account-service is the destination — meaning account-service
-        # has no outgoing downstream edges, so nx.descendants(g, "account-service")
-        # returns an empty set. This is purely to ensure account-service exists as
-        # a graph node while having zero consumers, testing the edge case.
-        dep("some-upstream-svc", "account-service", "api"),
+        # account-service is from_component here — meaning account-service
+        # is the consumer in this edge, not the provider.  This gives
+        # account-service a graph node but zero in-edges (no consumers
+        # pointing at it), so nx.ancestors returns empty.
+        dep("account-service", "some-downstream-svc", "api"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -181,19 +178,21 @@ def no_consumers_input():
 @pytest.fixture
 def canonical_transitive_input():
     """
-    Canonical regression test (as required by the audit):
-      account-service -> service-alpha  (direct consumer)
-      account-service -> service-beta   (direct consumer)
-      service-beta    -> service-gamma  (transitive consumer via service-beta)
+    Canonical regression test (consumer -> provider direction):
+      service-alpha -> account-service  (direct consumer)
+      service-beta  -> account-service  (direct consumer)
+      service-gamma -> service-beta     (transitive consumer via service-beta)
 
     Expected affected consumers: service-alpha, service-beta, service-gamma
-    Expected order: service-alpha and service-beta before service-gamma
-                    (service-gamma depends on service-beta, so service-beta first)
+    Expected order: service-gamma before service-beta
+                    (service-gamma depends on service-beta, so service-gamma
+                    must migrate first, then service-beta, then the provider
+                    can drop the old field)
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("account-service", "service-alpha", "api"),
-        dep("account-service", "service-beta",  "event"),
-        dep("service-beta",    "service-gamma", "undocumented"),
+        dep("service-alpha", "account-service", "api"),
+        dep("service-beta",  "account-service", "event"),
+        dep("service-gamma", "service-beta",    "undocumented"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}

@@ -6,14 +6,15 @@ Deterministic safety gate for Interlock.
 evaluate_gate() is pure read-only Python — zero LLM involvement.
 The critic agent CANNOT override the result of this function.
 
-Canonical edge direction: provider -> consumer.  A dependency_edge row
-reads ``from_component = account-service``, ``to_component = checkout``.
+Canonical edge direction: consumer -> provider.  A dependency_edge row
+reads ``from_component = checkout``, ``to_component = account-service``.
 This matches what the discovery agents emit and what the planning agent
-consumes via ``nx.descendants(provider)``.
+consumes via ``nx.ancestors(provider)``.
 
 Gate logic:
   1. Find all consumers that depend on the provider (account-service)
-     via dependency_edge rows.
+     via dependency_edge rows: collect from_component where
+     to_component == PROVIDER.
   2. Every required consumer must have a consumer_migration row with
      status == "verified".
   3. Any consumer missing a row → NOT_PROVEN_SAFE.
@@ -58,16 +59,16 @@ def get_required_consumers(conn: sqlite3.Connection, change_id: str) -> list[str
     """
     Return sorted list of component names that depend on the provider.
 
-    Canonical edge direction (see docs/prompts/00_SHARED_TEAM_CONTRACT.md):
-        from_component = provider   (the component that exposes the field)
-        to_component   = consumer   (the component that depends on it)
+    Canonical edge direction: consumer -> provider.
+        from_component = consumer  (the component that depends on the field)
+        to_component   = provider  (the component that exposes the field)
 
-    e.g. ``account-service -> checkout``.  Consumers are therefore read off
-    the ``to_component`` end of edges whose ``from_component`` is the provider.
+    e.g. ``checkout -> account-service``.  Consumers are therefore read off
+    the ``from_component`` end of edges whose ``to_component`` is the provider.
     """
     deps = ledger.get_dependencies(conn, change_id)
     consumers = sorted(
-        {d["to_component"] for d in deps if d["from_component"] == PROVIDER}
+        {d["from_component"] for d in deps if d["to_component"] == PROVIDER}
     )
     return consumers
 

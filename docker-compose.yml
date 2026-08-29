@@ -1,0 +1,48 @@
+# docker-compose.yml
+# Interlock — Verification Coexistence Rehearsal
+#
+# Runs the four fixture services as isolated Docker containers.
+# Each service builds from its own fixtures/ Dockerfile and executes
+# its pytest test suite.  All containers exit after their suite completes.
+#
+# The --abort-on-container-exit flag (used by coexistence_rehearsal.py)
+# causes the whole stack to stop as soon as any container exits, and the
+# exit code of the tracked service (--exit-code-from checkout) propagates
+# to the docker compose process.
+#
+# Design constraints (team contract):
+#   - No Kafka, no Kubernetes, no Temporal, no external services.
+#   - Keep infrastructure minimal: four services, one compose file.
+#   - account-service CMD is overridden to run pytest (the fixture's app.py
+#     is a plain module, not a FastAPI/uvicorn app in pre-migration state).
+
+services:
+
+  account-service:
+    build:
+      context: ./fixtures/account-service
+      dockerfile: Dockerfile
+    # Override the default CMD (uvicorn) — the fixture is a plain module,
+    # not a running HTTP server.  The rehearsal validates the test suite.
+    command: ["python", "-m", "pytest", "tests/", "-v", "--tb=short"]
+
+  checkout:
+    build:
+      context: ./fixtures/checkout
+      dockerfile: Dockerfile
+    depends_on:
+      - account-service
+
+  fraud:
+    build:
+      context: ./fixtures/fraud
+      dockerfile: Dockerfile
+    depends_on:
+      - account-service
+
+  analytics-worker:
+    build:
+      context: ./fixtures/analytics-worker
+      dockerfile: Dockerfile
+    depends_on:
+      - account-service

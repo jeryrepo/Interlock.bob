@@ -32,31 +32,33 @@ def api_dependencies(api_result):
 
 class TestAPIConsumersFound:
     def test_finds_checkout_as_api_consumer(self, api_dependencies):
-        """checkout must appear as an API consumer of account-service."""
+        """checkout must appear as an API consumer of account-service.
+        Canonical direction: from_component=checkout, to_component=account-service."""
         checkout_edges = [
             d for d in api_dependencies
-            if d["to_component"] == "checkout" and d["edge_type"] == "api"
+            if d["from_component"] == "checkout" and d["edge_type"] == "api"
         ]
         assert checkout_edges, (
-            "Expected a dependency edge from account-service to checkout with edge_type='api'"
+            "Expected a dependency edge checkout -> account-service with edge_type='api'"
         )
 
     def test_finds_fraud_as_api_consumer(self, api_dependencies):
-        """fraud must appear as an API consumer of account-service."""
+        """fraud must appear as an API consumer of account-service.
+        Canonical direction: from_component=fraud, to_component=account-service."""
         fraud_edges = [
             d for d in api_dependencies
-            if d["to_component"] == "fraud" and d["edge_type"] == "api"
+            if d["from_component"] == "fraud" and d["edge_type"] == "api"
         ]
         assert fraud_edges, (
-            "Expected a dependency edge from account-service to fraud with edge_type='api'"
+            "Expected a dependency edge fraud -> account-service with edge_type='api'"
         )
 
-    def test_both_consumers_from_account_service(self, api_dependencies):
-        """Both API consumer edges must originate from account-service."""
+    def test_both_consumers_point_to_account_service(self, api_dependencies):
+        """Both API consumer edges must terminate at account-service."""
         api_edges = [d for d in api_dependencies if d["edge_type"] == "api"]
         for edge in api_edges:
-            assert edge["from_component"] == "account-service", (
-                f"Expected from_component='account-service', got {edge['from_component']}"
+            assert edge["to_component"] == "account-service", (
+                f"Expected to_component='account-service', got {edge['to_component']}"
             )
 
 
@@ -68,7 +70,7 @@ class TestAnalyticsWorkerExcluded:
         """
         analytics_api_edges = [
             d for d in api_dependencies
-            if d["to_component"] == "analytics-worker" and d["edge_type"] == "api"
+            if d["from_component"] == "analytics-worker" and d["edge_type"] == "api"
         ]
         assert not analytics_api_edges, (
             "analytics-worker should not be classified as an API consumer; "

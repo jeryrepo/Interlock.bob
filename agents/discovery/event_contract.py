@@ -24,6 +24,12 @@ variable is named `account_response`, not `event` → NOT matched.
 No component name is hardcoded. The consumer identity is derived entirely
 from the directory containing the matched file.
 
+Canonical edge direction:
+  from_component = consumer  (the event-consuming component)
+  to_component   = provider  (account-service, which emits the event)
+
+e.g. analytics-worker -> account-service
+
 Returns a dict that validates as DiscoveryResult.
 Does NOT write to the database directly.
 Does NOT call other agents.
@@ -189,8 +195,8 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
         dependencies.append(
             Dependency(
-                from_component=_PROVIDER,
-                to_component=component,
+                from_component=component,
+                to_component=_PROVIDER,
                 edge_type="event",
                 reason=(
                     f"Undocumented event consumer: source accesses "
