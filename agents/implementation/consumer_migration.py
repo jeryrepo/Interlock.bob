@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from typing import Any, TypedDict
@@ -79,7 +80,7 @@ def _run_git(args: list[str], repo_path: Path) -> str:
 
 def _run_pytest(repo_path: Path) -> tuple[int, str]:
     """Run pytest inside repo_path; return (returncode, combined_output)."""
-    cmd = ["python", "-m", "pytest", str(repo_path), "-v", "--tb=short"]
+    cmd = [sys.executable, "-m", "pytest", str(repo_path), "-v", "--tb=short"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     combined = result.stdout + result.stderr
     return result.returncode, combined
