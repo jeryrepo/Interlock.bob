@@ -1,12 +1,8 @@
 """
 account-service — provider fixture for Interlock demo.
 
-Exposes customer account data by customer_id.
+Exposes a customer account by customer_id.
 This is the field that will be migrated: customer_id -> account_id.
-
-PRE-MIGRATION state: responses contain only customer_id.
-Post-migration: responses will contain both customer_id (deprecated)
-and account_id (new canonical identifier).
 """
 from __future__ import annotations
 
@@ -14,15 +10,15 @@ from typing import Optional
 
 
 class AccountResponse:
-    """Response model for the /accounts endpoint (pre-migration)."""
+    """Response model for the /accounts endpoint."""
+    customer_id: Optional[str] = None
 
     def __init__(self, customer_id: str):
-        self.customer_id: Optional[str] = customer_id
+        self.customer_id = customer_id
 
     def to_dict(self) -> dict:
         return {
             "customer_id": self.customer_id,
-            "account_id": self.customer_id,
         }
 
 

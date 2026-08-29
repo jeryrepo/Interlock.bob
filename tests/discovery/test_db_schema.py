@@ -128,3 +128,31 @@ class TestDBResultShape:
                 f"Evidence for {ev['subject']} missing 'schema_files' key"
             )
             assert isinstance(ev["content"]["schema_files"], list)
+
+
+class TestNoPythonTestFiles:
+    def test_python_test_file_not_picked_up(self, db_result, fixtures_root):
+        """
+        Regression: platform-config/tests/test_account_id_migration.py contains
+        the literal string 'customer_id' and its name contains 'migration', but it
+        must NOT appear as a source_ref or in any schema_files list.
+        """
+        py_test_rel = "platform-config/tests/test_account_id_migration.py"
+
+        for ev in db_result["evidence"]:
+            # Must not be the primary source_ref
+            assert not ev["source_ref"].startswith(py_test_rel), (
+                f"Python test file cited as source_ref: {ev['source_ref']}"
+            )
+            # Must not appear in the scanned schema_files list
+            schema_files = ev["content"].get("schema_files", [])
+            assert py_test_rel not in schema_files, (
+                f"Python test file listed in schema_files for {ev['subject']}: "
+                f"{schema_files}"
+            )
+            # Must not appear in any ref entry
+            refs = ev["content"].get("refs", [])
+            for ref in refs:
+                assert not ref.get("file", "").endswith(".py"), (
+                    f"Python file appeared in refs: {ref['file']}"
+                )

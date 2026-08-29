@@ -42,8 +42,15 @@ _SKIP_DIRS = {"__pycache__", ".git", ".venv", "node_modules"}
 
 
 def _is_schema_file(path: Path) -> bool:
-    """Return True if a file is a schema / migration file."""
-    if path.suffix.lower() in _SCHEMA_EXTS:
+    """Return True if a file is a schema / migration file.
+
+    Python files are never schema/migration files, even if the filename
+    happens to contain a pattern word like 'migration'.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        return False
+    if suffix in _SCHEMA_EXTS:
         return True
     name_lower = path.name.lower()
     return any(p in name_lower for p in _SCHEMA_NAME_PATTERNS)
