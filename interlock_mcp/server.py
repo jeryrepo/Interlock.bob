@@ -173,6 +173,56 @@ def interlock_dependency_graph(change_id: str, db_path: str = _DEFAULT_DB) -> st
 
 
 @mcp.tool()
+def interlock_review(change_id: str, db_path: str = _DEFAULT_DB) -> str:
+    """
+    Render a pull-request review for a change, as markdown.
+
+    Use this when the user is about to open a PR for a breaking change, or asks
+    what reviewers will see. The output is the same body the Interlock GitHub
+    Action posts, so what you show them locally is what will appear on the PR.
+
+    It names the blocking components and lists consumers that appear in no
+    published contract — the ones found only by reading source.
+    """
+    from interlock_cli import review as review_mod
+
+    conn = core.open_ledger(db_path)
+    status = core.status(conn, change_id)
+    graph = core.graph(conn, change_id)
+    risks = [e for e in core.evidence(conn, change_id) if e["claim_type"] == "risk"]
+    return review_mod.render_markdown(status, graph, risks)
+
+
+@mcp.tool()
+def interlock_orchestration_map(db_path: str = _DEFAULT_DB) -> str:
+    """
+    Describe how Interlock is wired: which agents run for which change kind, in
+    which phase, and what each proves.
+
+    Use this to answer questions about what Interlock will actually do for a
+    given kind of change before running it.
+    """
+    from orchestrator.agent_registry import AGENT_REGISTRY
+    from orchestrator.gate import _DEFAULT_STEP_KINDS, _REQUIRED_PROVIDER_STEPS, _REQUIRED_STEP_KINDS
+    from orchestrator.schemas import CHANGE_KINDS
+
+    phases = ["DISCOVERY", "PLANNING", "MODIFY", "REHEARSE", "VERIFY"]
+    return _render({
+        kind: {
+            "gate_requires": {
+                "provider": list(_REQUIRED_PROVIDER_STEPS.get(kind, ())),
+                "per_consumer": list(_REQUIRED_STEP_KINDS.get(kind, _DEFAULT_STEP_KINDS)),
+            },
+            "phases": {
+                phase: [a.role for a in AGENT_REGISTRY.get((kind, phase), ())]
+                for phase in phases
+            },
+        }
+        for kind in CHANGE_KINDS
+    })
+
+
+@mcp.tool()
 def interlock_list_changes(db_path: str = _DEFAULT_DB) -> str:
     """List known changes in this ledger, newest first."""
     conn = core.open_ledger(db_path)

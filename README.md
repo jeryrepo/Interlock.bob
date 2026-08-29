@@ -1,17 +1,81 @@
 # Interlock
 
-**A change-safety control plane for breaking cross-service changes.**
+**A change-safety control plane for breaking changes across services.**
 
-Renaming a field that other services depend on is easy to ship and hard to prove
-safe. The consumers you know about are in the API docs; the one that breaks
-production reads the field straight out of the source and was never documented
-anywhere.
+You are about to rename a field, drop an API response key, or move event
+delivery off webhooks. The consumers you know about are in the API docs. The one
+that takes production down on Friday reads the field straight out of the source
+and was never documented anywhere.
 
-Interlock takes a proposed change — the demo case is `customer_id -> account_id`
-on `account-service` — and runs agents to discover every consumer, migrate them,
-and verify them. A **deterministic gate** then decides whether removing the
-legacy field is provably safe. No LLM can override that gate, and no human can
-approve past it while a consumer is unverified.
+Interlock finds that one. Then it migrates every consumer, runs their real test
+suites, and a **deterministic gate** decides whether the change is provably safe.
+No model can override that gate, and no human can approve past it while a
+consumer is unverified.
+
+---
+
+## Who this is for
+
+**Engineers making a breaking change in a microservice estate** — where the
+dependency graph is only partly written down, and "who calls this?" has no
+trustworthy answer.
+
+You are the target user if any of these are true:
+
+- you are renaming a database column or model field other services read;
+- you are changing a published API contract;
+- you are moving inter-service delivery from webhooks to pub/sub;
+- you have ever shipped a change that was fine in CI and broke a service nobody
+  remembered existed.
+
+Also for **platform and SRE teams** who want that check to be a blocking gate
+rather than a code-review convention, and for **AI coding agents** — Interlock
+ships as an MCP server so the agent proposing the change can check it first.
+
+## Why use it
+
+**Because the dangerous consumers are the undocumented ones.** Grep finds the
+callers you already know about. Interlock reads source with an AST and surfaces
+the ones that appear in no contract, no config, and no README.
+
+**Because "the tests passed" is not the same as "it is safe".** Each service's
+suite passing in isolation says nothing about a provider serving old and new
+consumers simultaneously. Interlock proves the coexistence window by running the
+provider for real and asking it what it serves.
+
+**Because the verdict cannot be talked out of.** The gate is pure Python with
+zero model involvement. An agent can read it and cannot influence it. That is
+the point of the whole system: when it says VERIFIED, something checked, and the
+evidence has a git SHA attached.
+
+**Because it meets you where you already are.** A terminal command, a PR
+comment, or a tool your coding agent calls — not another dashboard to remember
+to visit.
+
+**What it is not:** a linter, a test runner, or a migration framework. It
+orchestrates the ones you already have and decides whether the result is safe.
+
+## How to use it
+
+Three surfaces over one engine, so they cannot disagree:
+
+| You are... | Use |
+| --- | --- |
+| at a terminal, before opening a PR | `interlock check` |
+| reviewing a pull request | the GitHub Action, or `interlock review` |
+| an AI coding agent (IBM Bob, Claude Code, Cursor) | the bundled MCP server |
+| demoing or exploring the evidence | the FastAPI + Streamlit UI |
+
+The shortest path:
+
+```bash
+pip install -e .
+interlock check --old customer_id --new account_id --provider account-service
+```
+
+It exits `0` when every consumer is proven safe and `1` when one is not, so it
+drops straight into a pre-push hook or a CI step. Everything below expands on
+that.
 
 ---
 
@@ -37,8 +101,51 @@ change is not proven safe**, so it works as a pre-push hook or a CI step:
 interlock check --old customer_id --new account_id --provider account-service || echo "blocked"
 ```
 
-Other commands: `start`, `approve`, `gate`, `status`, `list`, `evidence`.
-Add `--json` to any of them for machine-readable output.
+Other commands: `start`, `approve`, `gate`, `status`, `list`, `evidence`,
+`review`, `agents`. Add `--json` to any of them for machine-readable output.
+
+### The three kinds of change it covers
+
+Renaming a field is one instance of a wider problem: touching something in a
+microservice estate that other services depend on, where the dependency graph is
+only partly written down.
+
+```bash
+# a database / model field
+interlock check --kind field_rename \
+  --old customer_id --new account_id --provider account-service
+
+# a published API contract
+interlock check --kind api_contract_change \
+  --old customer_id --new account_id --provider account-service
+
+# an inter-service call: webhook delivery -> pub/sub
+interlock check --kind transport_migration \
+  --old deliver_via_webhook --new deliver_via_pubsub \
+  --provider event-publisher --components-root fixtures_transport
+```
+
+The transport case needs **two** proofs per subscriber, not one: that it moved
+to pub/sub, and that it has actually drained off the retired webhook. A
+subscriber that moved but still sends webhook traffic is not safe, and the gate
+says so.
+
+See how it is wired, per kind:
+
+```bash
+interlock agents
+```
+
+### Reviewing a pull request
+
+```bash
+interlock review --run --old customer_id --new account_id --provider account-service
+```
+
+Prints the exact markdown the GitHub Action posts on a PR — the verdict, the
+blocking components, and any consumer found only by reading source. Exits
+non-zero on `NOT_PROVEN_SAFE`, so it works as the blocking check itself.
+`.github/workflows/interlock.yml` runs this on every pull request.
 
 ### As a tool for IBM Bob and other coding agents
 

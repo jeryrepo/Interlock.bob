@@ -40,10 +40,16 @@ POST /change-requests
 | `orchestrator/db/schema.sql` | Canonical schema |
 | `orchestrator/state_machine.py` | `STATES` + strictly linear `TRANSITIONS` |
 | `orchestrator/gate.py` | Deterministic gate + NetworkX graph derivation |
-| `orchestrator/agent_runner.py` | Agent wrapper, retry, and phase workflow |
+| `orchestrator/agent_runner.py` | Agent wrapper, retry, routing, stub workflow |
+| `orchestrator/real_workflow.py` | The real-agent workflow, per change kind |
+| `orchestrator/agent_registry.py` | Which agents run for which (kind, phase) |
+| `orchestrator/adapters.py` | Agent return shapes -> orchestrator schemas |
+| `interlock_cli/` | `interlock` CLI; exits non-zero on NOT_PROVEN_SAFE |
+| `interlock_mcp/` | MCP server so Bob and other agents can call Interlock |
 | `orchestrator/schemas/` | Shared Pydantic contracts |
 | `agents/` | Discovery, planning, implementation, verification agents |
-| `fixtures/` | Fixture repositories the agents operate on |
+| `fixtures/` | Component tree for field/API changes |
+| `fixtures_transport/` | Component tree for webhook -> pub/sub changes |
 | `frontend/` | Streamlit UI (pure view layer) |
 | `tests/` | pytest suite, mirroring the package layout |
 
@@ -60,6 +66,62 @@ to move. Two states wait on a human:
 
 `run_workflow()` resumes from the persisted state and **never** auto-approves a
 human gate.
+
+### Real agents vs stubs
+
+Routing is per change, on whether it carries a structured `ChangeSpec`:
+
+| Change | Path |
+| --- | --- |
+| has a `change_spec` row | `real_workflow.py` — the real agents |
+| description only | the legacy stub workflow in `agent_runner.py` |
+
+`STUB_MODE` no longer means "stubs everywhere". It controls only whether the
+stub fallback is available for description-only changes.
+
+**Real runs never touch `fixtures/`.** The implementation agents rewrite files
+and `git commit` inside the path they are given, so every real run operates on a
+copy in `.interlock_work/<change_id>/`, git-initialised per component. Pointing
+an agent at `fixtures/` directly would commit into this repository — that has
+happened before. A test asserts the fixtures are unmutated; keep it passing.
+
+### Change kinds
+
+Three kinds, discriminated by `ChangeSpec.kind`. They exist because a developer
+touching something critical in a microservice estate is usually touching more
+than one of these at once:
+
+| Kind | What moves | Components live in |
+| --- | --- | --- |
+| `field_rename` | a schema / model field | `fixtures/` |
+| `api_contract_change` | a published API field or endpoint | `fixtures/` |
+| `transport_migration` | webhook delivery -> pub/sub | `fixtures_transport/` |
+
+Adding a kind means a registry entry in `agent_registry.py` plus, if its proof
+condition differs, an entry in `gate._REQUIRED_STEP_KINDS`. It must **not** mean
+new branching inside the gate (ADR-0002).
+
+See the whole fabric at any time:
+
+```bash
+interlock agents
+```
+
+That prints, per kind, which agents run in which phase and which work item each
+one proves. A step that no agent proves will hold every change of that kind at
+`NOT_PROVEN_SAFE` forever — there is a test asserting that cannot happen.
+
+### Step kinds
+
+`work_item.step_kind` is what the gate counts. `provider_patch` for the provider;
+`migrate` for a field or API consumer; `subscribe` **and** `webhook_quiet` for a
+transport subscriber. The two-step transport requirement is the point: a
+subscriber that moved to pub/sub but still sends webhook traffic is not safe,
+because retiring the webhook would still break it.
+
+Anything proved after MODIFY must be listed in
+`state_machine._PROVED_AFTER_MODIFY`, or it sits at `pending` and stalls the
+change.
 
 ## Invariants — do not break these
 
@@ -83,6 +145,26 @@ human gate.
    component constant.
 7. **No breaking API changes.** New endpoints are additive; existing response
    shapes stay stable.
+
+## Architecture decisions
+
+Irreversible decisions are recorded in [`docs/adr/`](docs/adr/README.md), one
+file per decision, with the context that forced it and the cost it carries.
+
+**Read the ADR index before changing architecture.** Do not contradict an
+accepted ADR. If you believe one is wrong, write a new ADR that supersedes it and
+say so in both files — never edit an accepted ADR to mean something different.
+
+Decisions most likely to be re-litigated by accident:
+
+- [ADR-0002](docs/adr/0002-deterministic-gate-stays-single-function.md) — the
+  gate stays **one** function. Per-kind variation is data, not a dispatch table.
+  This refactor looks like an improvement and is not.
+- [ADR-0003](docs/adr/0003-change-kind-discriminator.md) — change kinds go
+  through `ChangeSpec`. Do not add a fourth special case or reintroduce
+  hardcoded field names.
+- [ADR-0004](docs/adr/0004-streamlit-retained.md) — Streamlit stays until the
+  pipeline runs real agents. The revisit trigger is written down.
 
 ## Ownership boundaries
 
@@ -157,6 +239,22 @@ Backend:
 uvicorn orchestrator.main:app --reload
 ```
 
+CLI — no server needed, exits non-zero when the gate is not satisfied:
+
+```bash
+interlock check --old customer_id --new account_id --provider account-service
+```
+
+Preview exactly what the PR bot will post:
+
+```bash
+interlock review --run --old customer_id --new account_id --provider account-service
+```
+
+The review body is rendered by `interlock_cli/review.py`, **not** by inline
+JavaScript in the workflow. A formatter that only runs on a real pull request is
+one you debug in production; this one is a pure function with unit tests.
+
 Frontend (from the repository root, so `.streamlit/config.toml` is picked up):
 
 ```bash
@@ -174,10 +272,34 @@ python -m pytest -q
 
 - `pytest.ini` sets `--basetemp=.pytest_tmp` to avoid Windows temp permission
   errors. Both that directory and `interlock.db` are gitignored.
-- **Known issue:** four tests in `tests/implementation/test_consumer_migration.py`
-  fail in a full-suite run but pass when that file runs alone — a test-ordering
-  problem in that module, not a product bug. Do not "fix" it by weakening
-  assertions.
+- **Do not add `__init__.py` to a `tests/` subdirectory.** This is the sharpest
+  trap in the repo, and it has already cost two rounds of debugging.
+
+  `tests/` itself has no `__init__.py`. When a subdirectory *does* have one,
+  pytest walks up only as far as `tests/` and names the module
+  `verification.test_critic` rather than `tests.verification.test_critic` —
+  which then needs `tests/` on `sys.path`. That happens to be true when the
+  directory is run on its own and false in a full-suite run, so the breakage
+  looks like a test-ordering problem and is not one.
+
+  Measured, not assumed: adding `tests/verification/__init__.py` breaks
+  collection of all three verification modules in a full run while
+  `pytest tests/verification/` stays green. Adding `tests/__init__.py` is worse
+  — five collection errors across four packages.
+
+  `tests/discovery/`, `tests/planning/`, `tests/implementation/` and
+  `tests/frontend/` do have one. They are the anomaly, not the pattern to copy;
+  they survive only because pytest's rootdir insertion happens to cover them.
+  `tests/orchestrator/` and `tests/verification/` have none, deliberately.
+
+  The same mechanism caused four tests in
+  `tests/implementation/test_consumer_migration.py` to fail in full-suite runs
+  until 2026-08-29. They imported `from tests.implementation.conftest import ...`,
+  which cannot resolve without `tests/__init__.py`. Fixed by using the
+  `tmp_checkout_repo` / `tmp_fraud_repo` / `tmp_analytics_worker_repo` fixtures
+  that `tests/implementation/conftest.py` already exposed. **Never import
+  conftest directly** — pytest loads it specially, and importing it as a module
+  can create a second, divergent instance. Use fixtures.
 - **Test hygiene:** the FastAPI lifespan assigns `app.state.conn` from the
   configured on-disk database, so an in-memory override installed *before*
   `TestClient(app)` is discarded and the test then mutates `interlock.db`.
@@ -206,7 +328,7 @@ python -m pytest -q
 ## Before opening a PR
 
 - [ ] project still starts (backend and UI)
-- [ ] tests pass (minus the known pre-existing failures above)
+- [ ] tests pass — the suite is fully green, so any failure is yours
 - [ ] no duplicate schemas
 - [ ] no direct SQLite access from agents or frontend
 - [ ] no agent-to-agent calls
@@ -214,3 +336,6 @@ python -m pytest -q
 - [ ] no fake Git SHAs or test results
 - [ ] no breaking API changes
 - [ ] changes stay within the ownership area unless discussed
+- [ ] no new `__init__.py` in a `tests/` subdirectory (see the testing note above)
+- [ ] no agent pointed at `fixtures/` directly — real runs use a workspace copy
+- [ ] gate policy still lives only in `gate.py`, as data (ADR-0002)

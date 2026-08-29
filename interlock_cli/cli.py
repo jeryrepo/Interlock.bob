@@ -27,6 +27,26 @@ import typer
 
 from interlock_cli import core, review as review_mod
 
+def _force_utf8_output() -> None:
+    """
+    Emit UTF-8 regardless of the console's default codepage.
+
+    The review renderer uses status glyphs, and a Windows console defaults to
+    cp1252, which cannot encode them — `interlock review` crashed with a
+    UnicodeEncodeError rather than printing. `errors="replace"` means an
+    exotic terminal degrades a glyph instead of losing the whole report.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
+_force_utf8_output()
+
 app = typer.Typer(
     name="interlock",
     help="Change-safety control plane. Nothing ships until every consumer is proven safe.",

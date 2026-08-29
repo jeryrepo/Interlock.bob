@@ -1,0 +1,105 @@
+# Interlock — change-safety check on every pull request
+#
+# The review body is rendered by `interlock review`, not by inline JavaScript
+# here. That keeps the renderer testable: a formatter buried in a github-script
+# block is only ever exercised on a real PR, which is exactly when you do not
+# want to discover it is wrong.
+#
+# `interlock review` exits 1 on NOT_PROVEN_SAFE, which is what makes this a
+# blocking check rather than a report nobody reads.
+#
+# This workflow never approves legacy removal. Coordination is auto-approved
+# because CI has no human at a terminal; authorising removal of the deprecated
+# field stays a human decision.
+
+name: interlock
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      old_symbol:
+        description: "Symbol being replaced"
+        required: true
+        default: customer_id
+      new_symbol:
+        description: "Replacement symbol"
+        required: true
+        default: account_id
+      provider:
+        description: "Component that owns the change"
+        required: true
+        default: account-service
+      kind:
+        description: "field_rename | api_contract_change | transport_migration"
+        required: true
+        default: field_rename
+      components_root:
+        description: "Directory whose subdirectories are the components"
+        required: true
+        default: fixtures
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Interlock
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run the test suite
+        run: python -m pytest -q
+
+      - name: Configure git for the implementation agents
+        # The agents make real commits inside an isolated workspace copy, so a
+        # committer identity is required. Nothing is committed to this repo.
+        run: |
+          git config --global user.email "interlock@github-actions"
+          git config --global user.name "Interlock CI"
+
+      - name: Render the change-safety review
+        id: review
+        run: |
+          set +e
+          interlock review --run \
+            --kind "${{ github.event.inputs.kind || 'field_rename' }}" \
+            --old "${{ github.event.inputs.old_symbol || 'customer_id' }}" \
+            --new "${{ github.event.inputs.new_symbol || 'account_id' }}" \
+            --provider "${{ github.event.inputs.provider || 'account-service' }}" \
+            --components-root "${{ github.event.inputs.components_root || 'fixtures' }}" \
+            --format markdown > review.md
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          cat review.md
+
+      - name: Post the review on the pull request
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.existsSync('review.md')
+              ? fs.readFileSync('review.md', 'utf8')
+              : '## Interlock\n\nThe gate did not produce a review. See the job log.';
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Fail if the change is not proven safe
+        if: steps.review.outputs.exit_code != '0'
+        run: |
+          echo "::error::Interlock gate returned NOT_PROVEN_SAFE"
+          exit 1

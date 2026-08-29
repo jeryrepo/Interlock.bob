@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "interlock": {
+      "command": "python",
+      "args": ["-m", "interlock_mcp.server"],
+      "cwd": ".",
+      "env": {
+        "INTERLOCK_DB_PATH": "interlock.db",
+        "INTERLOCK_COMPONENTS_ROOT": "fixtures"
+      },
+      "alwaysAllow": [
+        "interlock_gate",
+        "interlock_status",
+        "interlock_evidence",
+        "interlock_dependency_graph",
+        "interlock_list_changes"
+      ],
+      "disabled": false
+    }
+  }
+}

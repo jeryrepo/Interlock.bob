@@ -124,7 +124,10 @@ build/
 # ============================================
 # LOCAL SQLITE DATABASE (runtime state)
 # ============================================
-interlock.db
+# Any local SQLite ledger, not just the default name. The CLI takes --db, so
+# ad-hoc ledgers (api.db, transport.db, rev.db ...) appear during local runs and
+# in tests; one of them has already been committed by accident once.
+*.db
 interlock.db-shm
 interlock.db-wal
 
@@ -158,3 +161,6 @@ htmlcov/
 uvicorn.log
 streamlit.log
 scratch/
+
+# Interlock real-agent workspaces (isolated copies of the component tree)
+.interlock_work/
