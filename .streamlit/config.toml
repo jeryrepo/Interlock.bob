@@ -1,0 +1,28 @@
+# Streamlit theme for the Interlock demo UI.
+# Read automatically when running `streamlit run frontend/streamlit_app.py`
+# from the repository root.
+#
+# [theme] is the light variant and [theme.dark] the dark one.  `base` is
+# deliberately NOT pinned, so the app follows the viewer's choice in
+# Settings → Appearance (or their system preference) and works in both.
+# frontend/utils/theme.py mirrors these palettes for the custom panels.
+
+[theme]
+primaryColor = "#0e7490"
+backgroundColor = "#f4f6f9"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#0f172a"
+borderColor = "#d9e0e8"
+
+[theme.dark]
+primaryColor = "#22d3ee"
+backgroundColor = "#0b0f14"
+secondaryBackgroundColor = "#121821"
+textColor = "#e6edf3"
+borderColor = "#1e2733"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
