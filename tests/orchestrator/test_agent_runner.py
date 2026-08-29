@@ -91,7 +91,7 @@ class TestRunWorkflow:
     def test_first_call_seeds_dependencies_including_analytics_worker(self, conn, change):
         run_workflow(conn, change["id"])
         deps = ledger.get_dependencies(conn, change["id"])
-        components = {d["from_component"] for d in deps}
+        components = {d["to_component"] for d in deps}
         assert "analytics-worker" in components
 
     def test_second_call_from_modify_stops_at_approve(self, conn, change):

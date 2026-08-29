@@ -169,14 +169,14 @@ def stub_repo_map(context: dict) -> DiscoveryResult:
         ],
         dependencies=[
             Dependency(
-                from_component="checkout",
-                to_component="account-service",
+                from_component="account-service",
+                to_component="checkout",
                 edge_type="api",
                 reason="checkout calls /accounts/{customer_id}",
             ),
             Dependency(
-                from_component="fraud",
-                to_component="account-service",
+                from_component="account-service",
+                to_component="fraud",
                 edge_type="api",
                 reason="fraud calls /accounts/{customer_id} for risk scoring",
             ),
@@ -221,8 +221,8 @@ def stub_event_contract_discovery(context: dict) -> DiscoveryResult:
         ],
         dependencies=[
             Dependency(
-                from_component="analytics-worker",
-                to_component="account-service",
+                from_component="account-service",
+                to_component="analytics-worker",
                 edge_type="undocumented",
                 reason="Source code directly accesses customer_id field",
             )
