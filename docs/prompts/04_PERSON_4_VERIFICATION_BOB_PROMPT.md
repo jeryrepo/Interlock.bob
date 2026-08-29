@@ -13,6 +13,11 @@ Build:
 
 Also own verification tests and Docker Compose setup.
 
+Missing Docker is a failed, unproven rehearsal and must block the workflow. It
+must never be converted to `verified`; the operator resumes after Docker is
+available. Python subprocesses must use `sys.executable` so tests run in the
+same environment as the orchestrator.
+
 ## First action
 Start in Plan Mode. Inspect repository contracts and fixtures. Do not modify the deterministic gate.
 

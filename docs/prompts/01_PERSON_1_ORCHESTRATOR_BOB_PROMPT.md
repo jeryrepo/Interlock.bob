@@ -104,6 +104,7 @@ GET  /change-requests/{id}
 GET  /change-requests/{id}/evidence
 GET  /change-requests/{id}/graph
 POST /change-requests/{id}/approve
+POST /change-requests/{id}/resume
 ```
 
 Responses must be stable enough for the Streamlit teammate to consume.

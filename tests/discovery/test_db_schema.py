@@ -32,21 +32,21 @@ def db_dependencies(db_result):
 class TestPlatformConfigDiscovered:
     def test_finds_platform_config_as_db_consumer(self, db_dependencies):
         """platform-config must appear as a db-type consumer.
-        Canonical direction: from_component=platform-config, to_component=account-service."""
+        Canonical direction: from_component=account-service, to_component=platform-config."""
         db_edges = [
             d for d in db_dependencies
-            if d["from_component"] == "platform-config" and d["edge_type"] == "db"
+            if d["to_component"] == "platform-config" and d["edge_type"] == "db"
         ]
         assert db_edges, (
-            "Expected a db-type dependency edge platform-config -> account-service. "
+            "Expected a db-type dependency edge account-service -> platform-config. "
             "Check that platform-config/schema.sql contains 'customer_id'."
         )
 
     def test_provider_is_account_service(self, db_dependencies):
-        """All DB dependency edges must terminate at account-service (to_component)."""
+        """All DB dependency edges must originate at account-service."""
         for dep in db_dependencies:
-            assert dep["to_component"] == "account-service", (
-                f"Expected to_component='account-service', got {dep['to_component']}"
+            assert dep["from_component"] == "account-service", (
+                f"Expected from_component='account-service', got {dep['from_component']}"
             )
 
 

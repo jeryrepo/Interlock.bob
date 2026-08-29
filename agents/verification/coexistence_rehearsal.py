@@ -23,6 +23,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from orchestrator.schemas.common import Evidence
 from orchestrator.schemas.verification import VerificationResult
 
@@ -38,8 +40,7 @@ def _run_compose(
     timeout: int = 300,
 ) -> tuple[int, str]:
     """
-    Run ``docker compose up --build --abort-on-container-exit`` against
-    ``compose_file``.
+    Build and run every Compose service sequentially.
 
     Returns (returncode, combined_output).  The combined output is the raw
     stdout+stderr from the docker compose process — never synthesised.
@@ -52,28 +53,35 @@ def _run_compose(
         Docker Compose project name; isolated so rehearsal containers do not
         collide with other running compose stacks.
     extra_args : list[str] | None
-        Additional arguments appended after ``up`` (e.g. a service filter).
+        Optional service-name subset. By default every declared service runs.
     timeout : int
         Seconds before the subprocess is force-killed.  Default 300 s.
     """
-    cmd = [
-        "docker", "compose",
-        "-f", str(compose_file),
-        "-p", project_name,
-        "up",
-        "--build",
-        "--abort-on-container-exit",
-        "--exit-code-from", "checkout",   # use any service; all run pytest and exit
-    ] + (extra_args or [])
+    compose = yaml.safe_load(compose_file.read_text(encoding="utf-8")) or {}
+    declared_services = list((compose.get("services") or {}).keys())
+    services = extra_args or declared_services
+    if not services:
+        return 2, f"No services declared in {compose_file}"
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    combined = result.stdout + result.stderr
-    return result.returncode, combined
+    output: list[str] = []
+    for service in services:
+        cmd = [
+            "docker", "compose",
+            "-f", str(compose_file),
+            "-p", project_name,
+            "run", "--build", "--rm", "--no-deps", service,
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        output.append(f"[{service}]\n{result.stdout}{result.stderr}")
+        if result.returncode != 0:
+            return result.returncode, "\n".join(output)
+
+    return 0, "\n".join(output)
 
 
 def _cleanup_compose(compose_file: Path, project_name: str = "interlock-rehearsal") -> None:
@@ -157,26 +165,29 @@ def run(
             timeout=timeout,
         )
     except FileNotFoundError:
-        # Docker binary is not installed or not on PATH.  This is an
-        # environment gap, not a real test failure.  Return a soft-skip:
-        # status="verified" so the workflow can continue, but a "risk"
-        # evidence entry so the critic and gate see it was not proven.
+        # Missing infrastructure is not proof. Record a failed test result so
+        # the state machine remains at REHEARSE and an operator can resume once
+        # Docker is available.
         return VerificationResult(
             change_id=change_id,
             consumer=consumer,
-            status="verified",
+            status="failed",
             evidence=[
                 Evidence(
-                    claim_type="risk",
+                    claim_type="test_result",
                     subject=consumer,
                     content={
+                        "returncode": 127,
+                        "docker_output": "docker executable not found on PATH",
+                        "compose_file": str(compose_file),
+                        "timed_out": False,
                         "note": (
                             "Docker unavailable in this environment — "
                             "coexistence rehearsal skipped, not proven"
                         )
                     },
                     source_ref=str(compose_file),
-                    confidence="hypothesis",
+                    confidence="refuted",
                     source_revision=commit_ref,
                 )
             ],

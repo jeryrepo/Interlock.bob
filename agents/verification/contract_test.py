@@ -19,6 +19,8 @@ Contract:
 from __future__ import annotations
 
 import subprocess
+import sys
+import os
 from pathlib import Path
 from typing import Any
 
@@ -37,11 +39,14 @@ def _run_pytest(repo_path: Path) -> tuple[int, str]:
     Returns (returncode, combined_output).  The combined output is the raw
     stdout+stderr from the pytest process — never synthesised.
     """
-    cmd = ["python", "-m", "pytest", str(repo_path), "-v", "--tb=short"]
+    cmd = [sys.executable, "-m", "pytest", str(repo_path), "-v", "--tb=short"]
+    env = os.environ.copy()
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
+        env=env,
     )
     combined = result.stdout + result.stderr
     return result.returncode, combined
@@ -109,7 +114,7 @@ def run(data: dict[str, Any], repo_path: Path) -> VerificationResult:
             "returncode": returncode,
             "output": output,
             "repo_path": str(repo_path),
-            "command": ["python", "-m", "pytest", str(repo_path), "-v", "--tb=short"],
+            "command": [sys.executable, "-m", "pytest", str(repo_path), "-v", "--tb=short"],
         },
         source_ref=str(repo_path),
         confidence=confidence,

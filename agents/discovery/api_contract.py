@@ -14,10 +14,10 @@ variable named `event`, not `account_response`, and its directory contains
 no reference to account-service in its README.
 
 Canonical edge direction:
-  from_component = consumer  (the component that calls the API)
-  to_component   = provider  (account-service, which exposes the field)
+  from_component = provider  (account-service, which exposes the field)
+  to_component   = consumer  (the component that calls the API)
 
-e.g. checkout -> account-service
+e.g. account-service -> checkout
 
 Returns a dict that validates as DiscoveryResult.
 Does NOT write to the database directly.
@@ -198,9 +198,10 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
         dependencies.append(
             Dependency(
-                from_component=component,
-                to_component=_PROVIDER,
+                from_component=_PROVIDER,
+                to_component=component,
                 edge_type="api",
+                documentation_status="documented",
                 reason=(
                     f"Source code accesses {_API_RESPONSE_VAR}[\"{old_field}\"] "
                     f"at {source_ref}"

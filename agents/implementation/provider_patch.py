@@ -29,6 +29,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import os
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -65,7 +66,9 @@ class _PatchResult(TypedDict):
 def _run_git(args: list[str], repo_path: Path) -> str:
     """Run a git command scoped to repo_path; raise RuntimeError on failure."""
     cmd = ["git", "-C", str(repo_path)] + args
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if result.returncode != 0:
         raise RuntimeError(
             f"git {' '.join(args)} failed (exit {result.returncode}):\n"
@@ -416,14 +419,11 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
     # Step 7: Git commit.
     # ------------------------------------------------------------------
     _run_git(["add", "."], repo_path)
-    _run_git(
-        [
-            "commit",
-            "-m",
-            f"provider-patch: add {new_field}, retain {old_field}",
-        ],
-        repo_path,
-    )
+    if _run_git(["status", "--porcelain"], repo_path):
+        _run_git(
+            ["commit", "-m", f"provider-patch: add {new_field}, retain {old_field}"],
+            repo_path,
+        )
 
     # ------------------------------------------------------------------
     # Step 8: Retrieve the real commit SHA.

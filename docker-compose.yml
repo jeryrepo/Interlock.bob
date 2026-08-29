@@ -5,10 +5,9 @@
 # Each service builds from its own fixtures/ Dockerfile and executes
 # its pytest test suite.  All containers exit after their suite completes.
 #
-# The --abort-on-container-exit flag (used by coexistence_rehearsal.py)
-# causes the whole stack to stop as soon as any container exits, and the
-# exit code of the tracked service (--exit-code-from checkout) propagates
-# to the docker compose process.
+# coexistence_rehearsal.py builds and runs every declared service sequentially.
+# This guarantees that a fast successful container cannot stop the stack before
+# a slower failing suite reports its result.
 #
 # Design constraints (team contract):
 #   - No Kafka, no Kubernetes, no Temporal, no external services.

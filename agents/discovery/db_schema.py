@@ -8,10 +8,10 @@ the target field (default: "customer_id").  Uses simple line-by-line text
 search (appropriate for SQL and config files, which are not Python AST).
 
 Canonical edge direction:
-  from_component = consumer  (the component whose schema references the field)
-  to_component   = provider  (account-service, which owns the field)
+  from_component = provider  (account-service, which owns the field)
+  to_component   = consumer  (the component whose schema references the field)
 
-e.g. platform-config -> account-service
+e.g. account-service -> platform-config
 
 Returns a dict that validates as DiscoveryResult.
 Does NOT write to the database directly.
@@ -161,9 +161,10 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
         dependencies.append(
             Dependency(
-                from_component=component,
-                to_component=_PROVIDER,
+                from_component=_PROVIDER,
+                to_component=component,
                 edge_type="db",
+                documentation_status="documented",
                 reason=(
                     f"Schema file references '{old_field}' at {source_ref}"
                 ),

@@ -13,8 +13,8 @@ Stub agents:
 - STUB_MODE controls whether stubs or real agents run.
 - When real agents land, set STUB_MODE = False and wire in real callables.
 - Stubs MUST NOT run alongside real agents during integration.
-- All stubs return schema-valid objects seeded with demo data including
-  analytics-worker as the undocumented dependency (discovered from source).
+- Stub mode keeps implementation/verification fast, while discovery and
+  planning remain evidence-driven so no component can be hardcoded.
 
 run_workflow():
 - Resumes agent work from the change's CURRENT persisted state.
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import sqlite3
 import tempfile
 import shutil
@@ -45,7 +46,6 @@ import orchestrator.ledger as ledger
 import orchestrator.state_machine as sm
 from orchestrator.gate import evaluate_gate, get_required_consumers
 from orchestrator.schemas import (
-    Dependency,
     DiscoveryResult,
     Evidence,
     ImplementationResult,
@@ -77,6 +77,11 @@ _FIXTURES_ROOT: Path = Path(__file__).parent.parent / "fixtures"
 # Project root (for docker-compose.yml location).
 _PROJECT_ROOT: Path = Path(__file__).parent.parent
 
+# Real implementation agents are intentionally destructive: they edit files and
+# create commits. Give every change request its own disposable set of fixture
+# repositories so workflow execution can never mutate the Interlock checkout.
+_WORKSPACE_BASE: Path = Path(tempfile.gettempdir()) / "interlock-workspaces"
+
 # Fixed change-request fields used by implementation agents.
 # These match the demo change described in 00_SHARED_TEAM_CONTRACT.md.
 _CHANGE_REQUEST_DEFAULTS = {
@@ -84,6 +89,65 @@ _CHANGE_REQUEST_DEFAULTS = {
     "new_field": "account_id",
     "provider": "account-service",
 }
+
+
+def _run_workspace_git(repo_path: Path, *args: str) -> str:
+    """Run a Git command while preparing an isolated fixture repository."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), *args],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"git {' '.join(args)} failed in {repo_path}: {detail}")
+    return result.stdout.strip()
+
+
+def _ensure_change_workspace(change_id: str) -> Path:
+    """Return a persistent, isolated fixture root for one change request.
+
+    The directory is retained across retries for the lifetime of the local
+    machine. Each fixture is initialized as its own Git repository so agent
+    commits cannot escape into the Interlock repository that contains it.
+    """
+    workspace_root = _WORKSPACE_BASE / change_id
+    fixtures_root = workspace_root / "fixtures"
+    fixtures_root.mkdir(parents=True, exist_ok=True)
+
+    def _ignore(_directory: str, names: list[str]) -> set[str]:
+        ignored = {".git", "__pycache__", ".pytest_cache", ".pytest_tmp"}
+        return ignored.intersection(names)
+
+    for source in sorted(path for path in _FIXTURES_ROOT.iterdir() if path.is_dir()):
+        destination = fixtures_root / source.name
+        if not destination.exists():
+            shutil.copytree(source, destination, ignore=_ignore)
+        if not (destination / ".git").exists():
+            # A previous process may have stopped after the copy but before Git
+            # initialization. Filling from the immutable source makes retry
+            # preparation deterministic without discarding completed repos.
+            shutil.copytree(source, destination, dirs_exist_ok=True, ignore=_ignore)
+            _run_workspace_git(destination, "init")
+        _run_workspace_git(destination, "config", "user.email", "interlock@localhost")
+        _run_workspace_git(destination, "config", "user.name", "Interlock Orchestrator")
+        exclude_file = destination / ".git" / "info" / "exclude"
+        exclude_file.write_text(
+            "__pycache__/\n*.py[cod]\n.pytest_cache/\n.pytest_tmp/\n",
+            encoding="utf-8",
+        )
+        try:
+            _run_workspace_git(destination, "rev-parse", "--verify", "HEAD")
+        except RuntimeError:
+            _run_workspace_git(destination, "add", ".")
+            _run_workspace_git(destination, "commit", "-m", "fixture baseline")
+
+    compose_source = _PROJECT_ROOT / "docker-compose.yml"
+    compose_destination = workspace_root / "docker-compose.yml"
+    if not compose_destination.exists():
+        shutil.copy2(compose_source, compose_destination)
+
+    return fixtures_root
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -169,9 +233,6 @@ class AgentRunner:
 # use them instead of the real agents.
 # ---------------------------------------------------------------------------
 
-_DEMO_CONSUMERS = ["checkout", "fraud", "analytics-worker"]
-
-
 def _evidence(claim_type: str, subject: str, content: dict, source_ref: str, confidence: str = "confirmed") -> Evidence:
     return Evidence(
         claim_type=claim_type,  # type: ignore[arg-type]
@@ -179,121 +240,6 @@ def _evidence(claim_type: str, subject: str, content: dict, source_ref: str, con
         content=content,
         source_ref=source_ref,
         confidence=confidence,  # type: ignore[arg-type]
-    )
-
-
-def stub_repo_map(context: dict) -> DiscoveryResult:
-    change_id = context["change_id"]
-    return DiscoveryResult(
-        change_id=change_id,
-        evidence=[
-            _evidence(
-                "dependency",
-                "account-service",
-                {"repo": "fixtures/account-service", "openapi": "openapi.yaml"},
-                "fixtures/account-service/openapi.yaml",
-            )
-        ],
-        dependencies=[
-            Dependency(
-                from_component="checkout",
-                to_component="account-service",
-                edge_type="api",
-                reason="checkout calls /accounts/{customer_id}",
-            ),
-            Dependency(
-                from_component="fraud",
-                to_component="account-service",
-                edge_type="api",
-                reason="fraud calls /accounts/{customer_id} for risk scoring",
-            ),
-        ],
-    )
-
-
-def stub_api_contract_discovery(context: dict) -> DiscoveryResult:
-    change_id = context["change_id"]
-    return DiscoveryResult(
-        change_id=change_id,
-        evidence=[
-            _evidence(
-                "dependency",
-                "checkout",
-                {"endpoint": "/accounts/{customer_id}", "method": "GET"},
-                "fixtures/account-service/openapi.yaml",
-            )
-        ],
-        dependencies=[],
-    )
-
-
-def stub_event_contract_discovery(context: dict) -> DiscoveryResult:
-    change_id = context["change_id"]
-    # analytics-worker is discovered from source code as an undocumented
-    # event consumer — this is the key story beat.
-    return DiscoveryResult(
-        change_id=change_id,
-        evidence=[
-            _evidence(
-                "dependency",
-                "analytics-worker",
-                {
-                    "file": "fixtures/analytics-worker/app/worker.py",
-                    "pattern": "customer_id",
-                    "note": "Direct field access found in source; not in API docs",
-                },
-                "fixtures/analytics-worker/app/worker.py",
-                "hypothesis",
-            )
-        ],
-        dependencies=[
-            Dependency(
-                from_component="analytics-worker",
-                to_component="account-service",
-                edge_type="undocumented",
-                reason="Source code directly accesses customer_id field",
-            )
-        ],
-    )
-
-
-def stub_db_schema_discovery(context: dict) -> DiscoveryResult:
-    change_id = context["change_id"]
-    # platform-config holds a schema reference but is not an active API consumer
-    # that requires a migration to be verified — it only needs a schema update.
-    # We record it as evidence but do NOT add it as a dependency_edge pointing
-    # at account-service, so the gate does not block waiting for its verification.
-    return DiscoveryResult(
-        change_id=change_id,
-        evidence=[
-            _evidence(
-                "dependency",
-                "platform-config",
-                {"schema_ref": "customer_id column present"},
-                "fixtures/platform-config/schema.sql",
-            )
-        ],
-        dependencies=[],
-    )
-
-
-def stub_compatibility_strategy(context: dict) -> PlanningResult:
-    change_id = context["change_id"]
-    return PlanningResult(
-        change_id=change_id,
-        migration_order=_DEMO_CONSUMERS,
-        evidence=[
-            _evidence(
-                "migration_status",
-                "migration-plan",
-                {
-                    "strategy": "dual-write",
-                    "order": _DEMO_CONSUMERS,
-                    "note": "analytics-worker must be patched before field removal",
-                },
-                "orchestrator/agent_runner.py",
-            )
-        ],
     )
 
 
@@ -490,7 +436,7 @@ def _real_compatibility_strategy(context: dict) -> dict:
     }
 
 
-def _make_real_provider_patch() -> Callable[[dict], dict]:
+def _make_real_provider_patch(repo_path: Path | None = None) -> Callable[[dict], dict]:
     """
     Return a closure that calls provider_patch.run() with the correct
     repo_path and adapts the result to ImplementationResult shape.
@@ -500,7 +446,7 @@ def _make_real_provider_patch() -> Callable[[dict], dict]:
 
         change_id: str = context["change_id"]
         provider = _CHANGE_REQUEST_DEFAULTS["provider"]
-        repo_path = _FIXTURES_ROOT / provider
+        target_repo = repo_path or (_FIXTURES_ROOT / provider)
 
         change_request = {
             "id": change_id,
@@ -511,7 +457,7 @@ def _make_real_provider_patch() -> Callable[[dict], dict]:
             "strategy_result": context.get("strategy_result", {}),
         }
 
-        result = provider_patch.run(data, repo_path)
+        result = provider_patch.run(data, target_repo)
 
         # Adapt _PatchResult → ImplementationResult shape.
         evidence: list[dict] = result.get("evidence", [])
@@ -528,7 +474,10 @@ def _make_real_provider_patch() -> Callable[[dict], dict]:
     return _adapter
 
 
-def _make_real_consumer_migration(consumer: str) -> Callable[[dict], dict]:
+def _make_real_consumer_migration(
+    consumer: str,
+    repo_path: Path | None = None,
+) -> Callable[[dict], dict]:
     """
     Return a closure for a specific consumer that calls consumer_migration.run()
     and adapts the result to ImplementationResult shape.
@@ -537,7 +486,7 @@ def _make_real_consumer_migration(consumer: str) -> Callable[[dict], dict]:
         from agents.implementation import consumer_migration
 
         change_id: str = context["change_id"]
-        repo_path = _FIXTURES_ROOT / consumer
+        target_repo = repo_path or (_FIXTURES_ROOT / consumer)
 
         change_request = {
             "id": change_id,
@@ -549,7 +498,7 @@ def _make_real_consumer_migration(consumer: str) -> Callable[[dict], dict]:
             "strategy_result": context.get("strategy_result", {}),
         }
 
-        result = consumer_migration.run(data, repo_path)
+        result = consumer_migration.run(data, target_repo)
 
         # Adapt _MigrationResult → ImplementationResult shape.
         evidence: list[dict] = result.get("evidence", [])
@@ -566,7 +515,10 @@ def _make_real_consumer_migration(consumer: str) -> Callable[[dict], dict]:
     return _adapter
 
 
-def _make_real_contract_test(consumer: str) -> Callable[[dict], VerificationResult]:
+def _make_real_contract_test(
+    consumer: str,
+    repo_path: Path | None = None,
+) -> Callable[[dict], VerificationResult]:
     """
     Return a closure for a specific consumer that calls contract_test.run()
     using the fixture's repo directory.
@@ -576,7 +528,7 @@ def _make_real_contract_test(consumer: str) -> Callable[[dict], VerificationResu
 
         change_id: str = context["change_id"]
         commit_ref: str | None = context.get("commit_ref")
-        repo_path = _FIXTURES_ROOT / consumer
+        target_repo = repo_path or (_FIXTURES_ROOT / consumer)
 
         data = {
             "change_id": change_id,
@@ -584,12 +536,14 @@ def _make_real_contract_test(consumer: str) -> Callable[[dict], VerificationResu
             "commit_ref": commit_ref,
         }
 
-        return contract_test.run(data, repo_path)
+        return contract_test.run(data, target_repo)
 
     return _adapter
 
 
-def _make_real_coexistence_rehearsal() -> Callable[[dict], VerificationResult]:
+def _make_real_coexistence_rehearsal(
+    compose_file: Path | None = None,
+) -> Callable[[dict], VerificationResult]:
     """
     Return a closure that calls coexistence_rehearsal.run() with the
     project-level docker-compose.yml.  Skipped (returns stub-like verified)
@@ -600,19 +554,26 @@ def _make_real_coexistence_rehearsal() -> Callable[[dict], VerificationResult]:
         from agents.verification import coexistence_rehearsal
 
         change_id: str = context["change_id"]
-        compose_file = _PROJECT_ROOT / "docker-compose.yml"
+        target_compose = compose_file or (_PROJECT_ROOT / "docker-compose.yml")
 
         data = {
             "change_id": change_id,
             "consumer": "coexistence",
         }
 
-        return coexistence_rehearsal.run(data, compose_file)
+        return coexistence_rehearsal.run(
+            data,
+            target_compose,
+            project_name=f"interlock-{change_id[:12]}",
+        )
 
     return _adapter
 
 
-def _make_real_critic(required_consumers: list[str]) -> Callable[[dict], VerificationResult]:
+def _make_real_critic(
+    required_consumers: list[str],
+    latest_migration_commit_ts: str | None = None,
+) -> Callable[[dict], VerificationResult]:
     """
     Return a closure that calls critic.run() with the orchestrator base URL
     and the known required consumers list.
@@ -627,6 +588,7 @@ def _make_real_critic(required_consumers: list[str]) -> Callable[[dict], Verific
             "change_id": change_id,
             "consumer": "critic",
             "required_consumers": required_consumers,
+            "latest_migration_commit_ts": latest_migration_commit_ts,
         }
 
         return critic.run(data, base_url=base_url)
@@ -643,20 +605,12 @@ def _run_discovery_phase(conn: sqlite3.Connection, change_id: str) -> None:
     """INTAKE → DISCOVERY: run all four discovery agents."""
     sm.advance(conn, change_id)  # INTAKE → DISCOVERY
 
-    if STUB_MODE:
-        discovery_agents = [
-            ("repo-map", stub_repo_map),
-            ("api-contract-discovery", stub_api_contract_discovery),
-            ("event-contract-discovery", stub_event_contract_discovery),
-            ("db-schema-discovery", stub_db_schema_discovery),
-        ]
-    else:
-        discovery_agents = [
-            ("repo-map", _real_repo_map),
-            ("api-contract-discovery", _real_api_contract_discovery),
-            ("event-contract-discovery", _real_event_contract_discovery),
-            ("db-schema-discovery", _real_db_schema_discovery),
-        ]
+    discovery_agents = [
+        ("repo-map", _real_repo_map),
+        ("api-contract-discovery", _real_api_contract_discovery),
+        ("event-contract-discovery", _real_event_contract_discovery),
+        ("db-schema-discovery", _real_db_schema_discovery),
+    ]
 
     for role, fn in discovery_agents:
         runner = AgentRunner(role, fn, DiscoveryResult)
@@ -669,7 +623,7 @@ def _run_discovery_phase(conn: sqlite3.Connection, change_id: str) -> None:
         for dep in result.dependencies:
             ledger.add_dependency(
                 conn, change_id, dep.from_component, dep.to_component,
-                dep.edge_type, dep.reason,
+                dep.edge_type, dep.reason, dep.documentation_status,
             )
 
 
@@ -678,13 +632,9 @@ def _run_planning_phase(conn: sqlite3.Connection, change_id: str) -> list[str]:
     Returns the migration_order list for use by subsequent phases."""
     sm.advance(conn, change_id)  # DISCOVERY → PLANNING
 
-    if STUB_MODE:
-        planning_fn = stub_compatibility_strategy
-        planning_context: dict = {"change_id": change_id}
-    else:
-        planning_fn = _real_compatibility_strategy
-        # Pass conn so the adapter can read ledger state
-        planning_context = {"change_id": change_id, "conn": conn}
+    planning_fn = _real_compatibility_strategy
+    # Planning always consumes the discovered ledger graph, even in stub mode.
+    planning_context = {"change_id": change_id, "conn": conn}
 
     runner = AgentRunner("compatibility-strategy", planning_fn, PlanningResult)
     plan: PlanningResult = runner.run(planning_context)  # type: ignore[assignment]
@@ -710,10 +660,14 @@ def _run_modify_phase(conn: sqlite3.Connection, change_id: str) -> list[str]:
     migrations = ledger.get_consumer_migrations(conn, change_id)
     migration_order = [m["consumer"] for m in migrations]
 
+    workspace_fixtures: Path | None = None
     if STUB_MODE:
         provider_patch_fn = stub_provider_patch
     else:
-        provider_patch_fn = _make_real_provider_patch()
+        workspace_fixtures = _ensure_change_workspace(change_id)
+        provider_patch_fn = _make_real_provider_patch(
+            workspace_fixtures / _CHANGE_REQUEST_DEFAULTS["provider"]
+        )
 
     runner = AgentRunner("provider-patch", provider_patch_fn, ImplementationResult)
     patch: ImplementationResult = runner.run({"change_id": change_id})  # type: ignore[assignment]
@@ -735,7 +689,10 @@ def _run_modify_phase(conn: sqlite3.Connection, change_id: str) -> list[str]:
             consumer_fn = stub_consumer_migration_fn
             consumer_context: dict = {"change_id": change_id, "consumer": consumer}
         else:
-            consumer_fn = _make_real_consumer_migration(consumer)
+            assert workspace_fixtures is not None
+            consumer_fn = _make_real_consumer_migration(
+                consumer, workspace_fixtures / consumer
+            )
             consumer_context = {"change_id": change_id}
 
         runner = AgentRunner(
@@ -768,13 +725,17 @@ def _run_modify_phase(conn: sqlite3.Connection, change_id: str) -> list[str]:
 
 def _run_rehearse_phase(conn: sqlite3.Connection, change_id: str) -> None:
     """MODIFY → REHEARSE: coexistence rehearsal."""
-    sm.advance(conn, change_id)  # MODIFY → REHEARSE
+    if sm.get_state(conn, change_id) == "MODIFY":
+        sm.advance(conn, change_id)  # MODIFY → REHEARSE
 
     if STUB_MODE:
         rehearsal_fn = stub_coexistence_rehearsal
         rehearsal_context: dict = {"change_id": change_id}
     else:
-        rehearsal_fn = _make_real_coexistence_rehearsal()
+        workspace_root = _ensure_change_workspace(change_id).parent
+        rehearsal_fn = _make_real_coexistence_rehearsal(
+            workspace_root / "docker-compose.yml"
+        )
         rehearsal_context = {"change_id": change_id}
 
     runner = AgentRunner("coexistence-rehearsal", rehearsal_fn, VerificationResult)
@@ -797,8 +758,8 @@ def _run_verify_phase(conn: sqlite3.Connection, change_id: str, migration_order:
 
     # Retrieve commit refs if stored
     commit_refs: dict[str, str | None] = {}
+    ev_rows = ledger.get_evidence(conn, change_id)
     if not STUB_MODE:
-        ev_rows = ledger.get_evidence(conn, change_id)
         for ev in ev_rows:
             if ev["claim_type"] == "migration_status" and ev["subject"] == "_commit_refs":
                 commit_refs = ev["content"]
@@ -809,7 +770,10 @@ def _run_verify_phase(conn: sqlite3.Connection, change_id: str, migration_order:
             contract_fn = stub_contract_test
             contract_context: dict = {"change_id": change_id, "consumer": consumer}
         else:
-            contract_fn = _make_real_contract_test(consumer)
+            workspace_fixtures = _ensure_change_workspace(change_id)
+            contract_fn = _make_real_contract_test(
+                consumer, workspace_fixtures / consumer
+            )
             contract_context = {
                 "change_id": change_id,
                 "consumer": consumer,
@@ -836,7 +800,16 @@ def _run_verify_phase(conn: sqlite3.Connection, change_id: str, migration_order:
         critic_fn = stub_critic
         critic_context: dict = {"change_id": change_id}
     else:
-        critic_fn = _make_real_critic(required_consumers)
+        migration_times = [
+            ev["created_at"]
+            for ev in ev_rows
+            if ev["claim_type"] == "migration_status" and ev.get("source_revision")
+        ]
+        latest_migration_commit_ts = max(migration_times, default=None)
+        critic_fn = _make_real_critic(
+            required_consumers,
+            latest_migration_commit_ts,
+        )
         critic_context = {"change_id": change_id}
 
     runner = AgentRunner("critic", critic_fn, VerificationResult)
@@ -897,6 +870,19 @@ def run_workflow(conn: sqlite3.Connection, change_id: str) -> None:
         _run_verify_phase(conn, change_id, migration_order)
         # Now in APPROVE (gate VERIFIED) or GATE_DECISION (blocked).
         # Either way: stop and let the human decide next.
+        return
+
+
+    if current == "REHEARSE":
+        # A failed or unavailable rehearsal deliberately leaves the workflow
+        # here. Re-running it is safe and permits an operator to resume after
+        # Docker or another external prerequisite becomes available.
+        migration_order = [
+            row["consumer"]
+            for row in ledger.get_consumer_migrations(conn, change_id)
+        ]
+        _run_rehearse_phase(conn, change_id)
+        _run_verify_phase(conn, change_id, migration_order)
         return
 
     # Any other state: nothing for the agent runner to do right now.

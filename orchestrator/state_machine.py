@@ -101,9 +101,25 @@ def can_advance(conn: sqlite3.Connection, change_id: str, current_state: str) ->
         return all(m["status"] in terminal for m in migrations)
 
     if current_state == "REHEARSE":
-        # Coexistence rehearsal evidence must exist.
-        evidence = ledger.get_evidence(conn, change_id)
-        return any(e["claim_type"] == "test_result" for e in evidence)
+        # Only a confirmed successful coexistence rehearsal permits VERIFY.
+        # A missing Docker executable, timeout, or non-zero test run remains a
+        # recorded failure and deliberately blocks advancement.
+        rehearsals = [
+            e for e in ledger.get_evidence(conn, change_id)
+            if e["claim_type"] == "test_result"
+            and e["subject"] in {"coexistence", "coexistence-rehearsal"}
+        ]
+        if not rehearsals:
+            return False
+        latest = rehearsals[-1]
+        content = latest.get("content", {})
+        return (
+            latest.get("confidence") == "confirmed"
+            and (
+                content.get("returncode") == 0
+                or content.get("dual_write_passed") is True
+            )
+        )
 
     if current_state == "VERIFY":
         # All consumer migrations must be verified or failed (no pending/in_progress).

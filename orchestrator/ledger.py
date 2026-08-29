@@ -56,6 +56,14 @@ def init_db(db_path: str = ":memory:") -> sqlite3.Connection:
 
     schema_sql = _SCHEMA_PATH.read_text(encoding="utf-8")
     conn.executescript(schema_sql)
+    dependency_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(dependency_edge)")
+    }
+    if "documentation_status" not in dependency_columns:
+        conn.execute(
+            "ALTER TABLE dependency_edge ADD COLUMN documentation_status "
+            "TEXT NOT NULL DEFAULT 'documented'"
+        )
     conn.commit()
     return conn
 
@@ -163,7 +171,7 @@ def add_evidence(
 def get_evidence(conn: sqlite3.Connection, change_id: str) -> list[dict]:
     """Return all evidence rows for a change, content parsed back to dict."""
     rows = conn.execute(
-        "SELECT * FROM evidence WHERE change_id = ? ORDER BY created_at",
+        "SELECT * FROM evidence WHERE change_id = ? ORDER BY created_at, rowid",
         (change_id,),
     ).fetchall()
     result = []
@@ -185,6 +193,7 @@ def add_dependency(
     to_component: str,
     edge_type: str,
     reason: str | None = None,
+    documentation_status: str = "documented",
 ) -> dict:
     """Insert a dependency edge and return it."""
     row_id = str(uuid.uuid4())
@@ -192,10 +201,12 @@ def add_dependency(
     conn.execute(
         """
         INSERT INTO dependency_edge
-            (id, change_id, from_component, to_component, edge_type, reason, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (id, change_id, from_component, to_component, edge_type,
+             documentation_status, reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (row_id, change_id, from_component, to_component, edge_type, reason, now),
+        (row_id, change_id, from_component, to_component, edge_type,
+         documentation_status, reason, now),
     )
     conn.commit()
     row = conn.execute(

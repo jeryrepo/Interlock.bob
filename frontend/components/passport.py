@@ -54,7 +54,10 @@ def render_passport(
     tests = contract_test_results(evidence)
     passed = [
         t for t in tests
-        if (t.get("content") or {}).get("tests_passed") is True
+        if (
+            (t.get("content") or {}).get("tests_passed") is True
+            or (t.get("content") or {}).get("returncode") == 0
+        )
     ]
     coexistence = coexistence_result(evidence)
     critic = critic_assessment(evidence)
@@ -85,7 +88,10 @@ def render_passport(
     # -- coexistence -------------------------------------------------------
     if coexistence:
         content = coexistence.get("content") or {}
-        ok = content.get("dual_write_passed") is True
+        ok = (
+            content.get("dual_write_passed") is True
+            or content.get("returncode") == 0
+        )
         colour = "var(--il-green)" if ok else "var(--il-red)"
         detail = " ".join(f"{k}={v}" for k, v in content.items())
         coexistence_html = f'<span style="color:{colour}">{html.escape(detail)}</span>'

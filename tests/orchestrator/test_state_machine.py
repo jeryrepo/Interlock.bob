@@ -25,7 +25,7 @@ class TestCanAdvance:
         ledger.update_change_status(conn, change["id"], "DISCOVERY")
         # No deps yet → cannot advance
         assert sm.can_advance(conn, change["id"], "DISCOVERY") is False
-        ledger.add_dependency(conn, change["id"], "checkout", "account-service", "api")
+        ledger.add_dependency(conn, change["id"], "account-service", "checkout", "api")
         assert sm.can_advance(conn, change["id"], "DISCOVERY") is True
 
     def test_planning_requires_consumer_row(self, conn, change):
@@ -53,6 +53,19 @@ class TestCanAdvance:
         assert sm.can_advance(conn, change["id"], "VERIFY") is False
         ledger.upsert_consumer_migration(conn, change["id"], "checkout", "verified")
         assert sm.can_advance(conn, change["id"], "VERIFY") is True
+
+    def test_rehearse_requires_confirmed_success(self, conn, change):
+        ledger.update_change_status(conn, change["id"], "REHEARSE")
+        ledger.add_evidence(
+            conn, change["id"], "test_result", "coexistence",
+            {"returncode": 127}, "compose.yml", "refuted",
+        )
+        assert sm.can_advance(conn, change["id"], "REHEARSE") is False
+        ledger.add_evidence(
+            conn, change["id"], "test_result", "coexistence",
+            {"returncode": 0}, "compose.yml", "confirmed",
+        )
+        assert sm.can_advance(conn, change["id"], "REHEARSE") is True
 
     def test_gate_decision_requires_verified_result(self, conn, change):
         ledger.update_change_status(conn, change["id"], "GATE_DECISION")
@@ -95,7 +108,7 @@ class TestAdvance:
 
         # INTAKE → DISCOVERY
         sm.advance(conn, cid)
-        ledger.add_dependency(conn, cid, "checkout", "account-service", "api")
+        ledger.add_dependency(conn, cid, "account-service", "checkout", "api")
 
         # DISCOVERY → PLANNING
         sm.advance(conn, cid)
@@ -110,7 +123,10 @@ class TestAdvance:
         ledger.upsert_consumer_migration(conn, cid, "checkout", "in_progress")
 
         # MODIFY → REHEARSE
-        ledger.add_evidence(conn, cid, "test_result", "x", {}, "f", "confirmed")
+        ledger.add_evidence(
+            conn, cid, "test_result", "coexistence",
+            {"returncode": 0}, "f", "confirmed",
+        )
         sm.advance(conn, cid)
 
         # REHEARSE → VERIFY

@@ -105,5 +105,20 @@ def render_approvals(
                 unsafe_allow_html=True,
             )
 
+    if state in {"MODIFY", "REHEARSE"}:
+        if st.button(
+            "Resume workflow",
+            key="resume-workflow",
+            use_container_width=True,
+            help="Retries the isolated migration or coexistence rehearsal after a failure.",
+        ):
+            try:
+                client.resume(change_id)
+            except ApiError as exc:
+                st.error(f"Resume rejected — {exc}")
+            else:
+                st.success(f"Workflow retry scheduled from {state}")
+                acted = True
+
     st.markdown("</div>", unsafe_allow_html=True)
     return acted

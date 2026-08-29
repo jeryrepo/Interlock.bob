@@ -25,10 +25,10 @@ No component name is hardcoded. The consumer identity is derived entirely
 from the directory containing the matched file.
 
 Canonical edge direction:
-  from_component = consumer  (the event-consuming component)
-  to_component   = provider  (account-service, which emits the event)
+  from_component = provider  (account-service, which emits the event)
+  to_component   = consumer  (the event-consuming component)
 
-e.g. analytics-worker -> account-service
+e.g. account-service -> analytics-worker
 
 Returns a dict that validates as DiscoveryResult.
 Does NOT write to the database directly.
@@ -195,9 +195,10 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
         dependencies.append(
             Dependency(
-                from_component=component,
-                to_component=_PROVIDER,
+                from_component=_PROVIDER,
+                to_component=component,
                 edge_type="event",
+                documentation_status="undocumented",
                 reason=(
                     f"Undocumented event consumer: source accesses "
                     f"event[\"{old_field}\"] at {source_ref}"

@@ -118,6 +118,7 @@ GET  /change-requests/{id}/graph
 GET  /change-requests/{id}/gate
 GET  /change-requests/{id}/approvals
 POST /change-requests/{id}/approve
+POST /change-requests/{id}/resume
 ```
 
 `/gate` and `/approvals` are read-only projections of ledger state that the
@@ -174,10 +175,8 @@ python -m pytest -q
 
 - `pytest.ini` sets `--basetemp=.pytest_tmp` to avoid Windows temp permission
   errors. Both that directory and `interlock.db` are gitignored.
-- **Known issue:** four tests in `tests/implementation/test_consumer_migration.py`
-  fail in a full-suite run but pass when that file runs alone — a test-ordering
-  problem in that module, not a product bug. Do not "fix" it by weakening
-  assertions.
+- The root pytest configuration excludes `fixtures/`; each fixture is a
+  standalone repository and must be tested from its own directory.
 - **Test hygiene:** the FastAPI lifespan assigns `app.state.conn` from the
   configured on-disk database, so an in-memory override installed *before*
   `TestClient(app)` is discarded and the test then mutates `interlock.db`.

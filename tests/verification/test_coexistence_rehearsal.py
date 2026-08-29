@@ -197,14 +197,14 @@ class TestCoexistenceRehearsalSchemaMocked:
 
 class TestDockerUnavailable:
     """
-    Soft-fail path: FileNotFoundError when Docker binary is missing.
+    Fail-closed path: FileNotFoundError when Docker binary is missing.
     No Docker process is spawned — _run_compose raises FileNotFoundError.
     """
 
     def _mock_run_compose_no_docker(self, *args, **kwargs):
         raise FileNotFoundError(2, "The system cannot find the file specified")
 
-    def test_returns_verified_status(self, tmp_path: Path):
+    def test_returns_failed_status(self, tmp_path: Path):
         fake_compose = tmp_path / "compose.yml"
         fake_compose.write_text("services: {}\n")
 
@@ -214,9 +214,9 @@ class TestDockerUnavailable:
                 fake_compose,
             )
 
-        assert result.status == "verified"
+        assert result.status == "failed"
 
-    def test_evidence_claim_type_is_risk(self, tmp_path: Path):
+    def test_evidence_claim_type_is_test_result(self, tmp_path: Path):
         fake_compose = tmp_path / "compose.yml"
         fake_compose.write_text("services: {}\n")
 
@@ -226,7 +226,8 @@ class TestDockerUnavailable:
                 fake_compose,
             )
 
-        assert result.evidence[0].claim_type == "risk"
+        assert result.evidence[0].claim_type == "test_result"
+        assert result.evidence[0].content["returncode"] == 127
 
     def test_evidence_note_mentions_docker_unavailable(self, tmp_path: Path):
         fake_compose = tmp_path / "compose.yml"
@@ -241,7 +242,7 @@ class TestDockerUnavailable:
         note = result.evidence[0].content.get("note", "")
         assert "Docker unavailable" in note
 
-    def test_evidence_confidence_is_hypothesis(self, tmp_path: Path):
+    def test_evidence_confidence_is_refuted(self, tmp_path: Path):
         fake_compose = tmp_path / "compose.yml"
         fake_compose.write_text("services: {}\n")
 
@@ -251,7 +252,7 @@ class TestDockerUnavailable:
                 fake_compose,
             )
 
-        assert result.evidence[0].confidence == "hypothesis"
+        assert result.evidence[0].confidence == "refuted"
 
 
 class TestNoFixtureMutationMocked:

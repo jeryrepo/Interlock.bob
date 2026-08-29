@@ -5,11 +5,11 @@ All inputs are plain dicts matching the shared contract shapes from
 docs/prompts/00_SHARED_TEAM_CONTRACT.md — no Pydantic imports.
 
 Canonical edge direction:
-  from_component = consumer  (the node that depends on the changing field)
-  to_component   = provider  (the node that exposes the field)
+  from_component = provider  (the node that exposes the field)
+  to_component   = consumer  (the node that depends on the changing field)
 
-Example: checkout -> account-service
-  dep("checkout", "account-service", "api")
+Example: account-service -> checkout
+  dep("account-service", "checkout", "api")
 
 Literal value sets (from contract):
   edge_type  : "api" | "event" | "db" | "undocumented"
@@ -66,14 +66,14 @@ def three_consumer_input():
     """
     account-service is the provider.
     Three consumers: svc-a (api), svc-b (event), svc-c (undocumented).
-    Canonical edges: svc-a / svc-b / svc-c -> account-service
+    Canonical edges: account-service -> svc-a / svc-b / svc-c
     No db consumers. No hardcoded Interlock names.
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("svc-a", "account-service", "api"),
-        dep("svc-b", "account-service", "event"),
-        dep("svc-c", "account-service", "undocumented"),
+        dep("account-service", "svc-a", "api"),
+        dep("account-service", "svc-b", "event"),
+        dep("account-service", "svc-c", "undocumented"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -86,9 +86,9 @@ def with_db_consumer_input():
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("svc-a",        "account-service", "api"),
-        dep("svc-b",        "account-service", "event"),
-        dep("platform-cfg", "account-service", "db"),
+        dep("account-service", "svc-a",        "api"),
+        dep("account-service", "svc-b",        "event"),
+        dep("account-service", "platform-cfg", "db"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -102,8 +102,8 @@ def unrelated_component_input():
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("svc-a", "account-service",    "api"),
-        dep("svc-x", "some-other-service", "api"),
+        dep("account-service",    "svc-a", "api"),
+        dep("some-other-service", "svc-x", "api"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -115,8 +115,8 @@ def cyclic_input():
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("svc-a",          "account-service", "api"),
-        dep("account-service", "svc-a",          "api"),   # cycle back
+        dep("account-service", "svc-a",          "api"),
+        dep("svc-a",          "account-service", "api"),   # cycle back
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -130,8 +130,8 @@ def no_analytics_worker_input():
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("svc-alpha", "account-service", "api"),
-        dep("svc-beta",  "account-service", "event"),
+        dep("account-service", "svc-alpha", "api"),
+        dep("account-service", "svc-beta",  "event"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -148,9 +148,9 @@ def arbitrary_names_input():
         new_field="modern_ref",
     )
     deps = [
-        dep("omega-ui",     "zeta-core", "api"),
-        dep("gamma-worker", "zeta-core", "event"),
-        dep("delta-cfg",    "zeta-core", "db"),
+        dep("zeta-core", "omega-ui",     "api"),
+        dep("zeta-core", "gamma-worker", "event"),
+        dep("zeta-core", "delta-cfg",    "db"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -159,10 +159,8 @@ def arbitrary_names_input():
 def no_consumers_input():
     """
     Provider exists but has no consumers pointing to it.
-    Canonical edges: consumer -> provider.
-    Here we supply an edge pointing FROM account-service TO some-other-svc,
-    so account-service exists as a graph node but has no edges pointing TO it,
-    meaning nx.ancestors(g, "account-service") returns an empty set.
+    Here account-service appears only as a consumer, so it has no downstream
+    consumers and nx.descendants(g, "account-service") is empty.
     """
     cr = make_cr(provider="account-service")
     deps = [
@@ -170,7 +168,7 @@ def no_consumers_input():
         # is the consumer in this edge, not the provider.  This gives
         # account-service a graph node but zero in-edges (no consumers
         # pointing at it), so nx.ancestors returns empty.
-        dep("account-service", "some-downstream-svc", "api"),
+        dep("some-upstream-svc", "account-service", "api"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}
 
@@ -179,9 +177,9 @@ def no_consumers_input():
 def canonical_transitive_input():
     """
     Canonical regression test (consumer -> provider direction):
-      service-alpha -> account-service  (direct consumer)
-      service-beta  -> account-service  (direct consumer)
-      service-gamma -> service-beta     (transitive consumer via service-beta)
+      account-service -> service-alpha  (direct consumer)
+      account-service -> service-beta   (direct consumer)
+      service-beta    -> service-gamma  (transitive consumer via service-beta)
 
     Expected affected consumers: service-alpha, service-beta, service-gamma
     Expected order: service-gamma before service-beta
@@ -191,8 +189,8 @@ def canonical_transitive_input():
     """
     cr = make_cr(provider="account-service")
     deps = [
-        dep("service-alpha", "account-service", "api"),
-        dep("service-beta",  "account-service", "event"),
-        dep("service-gamma", "service-beta",    "undocumented"),
+        dep("account-service", "service-alpha", "api"),
+        dep("account-service", "service-beta",  "event"),
+        dep("service-beta",    "service-gamma", "undocumented"),
     ]
     return {"change_request": cr, "dependencies": deps, "evidence": []}

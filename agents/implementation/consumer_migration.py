@@ -31,6 +31,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import os
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -81,7 +82,9 @@ def _run_git(args: list[str], repo_path: Path) -> str:
 def _run_pytest(repo_path: Path) -> tuple[int, str]:
     """Run pytest inside repo_path; return (returncode, combined_output)."""
     cmd = [sys.executable, "-m", "pytest", str(repo_path), "-v", "--tb=short"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     combined = result.stdout + result.stderr
     return result.returncode, combined
 
@@ -191,7 +194,31 @@ def _migrate_test_file(
     Same replacement as source files but applied to test files.
     Returns (new_content, was_changed).
     """
-    return _migrate_python_source(content, old_field, new_field)
+    # Repair output from an interrupted run of the older migrator, which
+    # incorrectly changed the legacy-key absence assertion to the new key.
+    content = re.sub(
+        r'(["\'])' + re.escape(new_field) + r'\1(\s+not\s+in\b)',
+        lambda m: m.group(1) + old_field + m.group(1) + m.group(2),
+        content,
+    )
+
+    # A negative assertion about the legacy key remains semantically valid
+    # after migration. Protect it while replacing positive usages.
+    placeholder = "__INTERLOCK_LEGACY_FIELD__"
+    protected = re.sub(
+        r'(["\'])' + re.escape(old_field) + r'\1(\s+not\s+in\b)',
+        lambda m: m.group(1) + placeholder + m.group(1) + m.group(2),
+        content,
+    )
+    migrated, _ = _migrate_python_source(protected, old_field, new_field)
+    migrated = migrated.replace(placeholder, old_field)
+    return migrated, migrated != content
+
+
+def _migrate_config_text(content: str, old_field: str, new_field: str) -> tuple[str, bool]:
+    """Migrate structured text such as SQL/YAML/JSON/TOML field references."""
+    migrated = re.sub(r"\b" + re.escape(old_field) + r"\b", new_field, content)
+    return migrated, migrated != content
 
 
 def _ensure_test_file(
@@ -305,6 +332,18 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
                 files_changed.append(str(rel))
             test_files_updated.append(path)
 
+    # Migrate non-Python configuration/schema files as well. This is required
+    # for platform-config, whose actual dependency is schema.sql.
+    for suffix in ("*.sql", "*.yaml", "*.yml", "*.json", "*.toml"):
+        for path in repo_path.rglob(suffix):
+            content = path.read_text(encoding="utf-8")
+            new_content, changed = _migrate_config_text(content, old_field, new_field)
+            if changed:
+                path.write_text(new_content, encoding="utf-8")
+                rel = str(path.relative_to(repo_path))
+                if rel not in files_changed:
+                    files_changed.append(rel)
+
     # ------------------------------------------------------------------
     # Step 4: Ensure at least one test asserts new_field is used.
     # ------------------------------------------------------------------
@@ -333,14 +372,11 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
     # Step 6: Git commit.
     # ------------------------------------------------------------------
     _run_git(["add", "."], repo_path)
-    _run_git(
-        [
-            "commit",
-            "-m",
-            f"consumer-migration({consumer}): migrate to {new_field}",
-        ],
-        repo_path,
-    )
+    if _run_git(["status", "--porcelain"], repo_path):
+        _run_git(
+            ["commit", "-m", f"consumer-migration({consumer}): migrate to {new_field}"],
+            repo_path,
+        )
 
     # ------------------------------------------------------------------
     # Step 7: Retrieve the real commit SHA.
@@ -374,7 +410,7 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
         "files_changed": files_changed,
         "summary": (
             f"Migrated '{consumer}' from '{old_field}' to '{new_field}' "
-            f"in {len(files_changed)} file(s). "
+            f"in {len(files_changed)} file(s) (or verified an existing migration). "
             f"All pytest tests pass. Commit: {commit_sha[:8]}."
         ),
         "commit_sha": commit_sha,

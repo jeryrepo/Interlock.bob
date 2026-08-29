@@ -47,7 +47,10 @@ def _undocumented_targets(edges: list[dict]) -> set[str]:
     return {
         e["to"]
         for e in edges
-        if e.get("to") and e.get("edge_type") == "undocumented"
+        if e.get("to") and (
+            e.get("documentation_status") == "undocumented"
+            or e.get("edge_type") == "undocumented"
+        )
     }
 
 
@@ -116,6 +119,7 @@ def _pyvis_html(nodes: list[dict], edges: list[dict], p: Palette) -> str | None:
         colour, dashed, label = styles.get(
             edge.get("edge_type", ""), _default_edge(p)
         )
+        dashed = dashed or edge.get("documentation_status") == "undocumented"
         reason = edge.get("reason") or ""
         net.add_edge(
             src,
@@ -175,6 +179,7 @@ def _fallback_html(edges: list[dict], p: Palette) -> str:
         colour, dashed, label = styles.get(
             edge.get("edge_type", ""), _default_edge(p)
         )
+        dashed = dashed or edge.get("documentation_status") == "undocumented"
         rows.append(
             f'<div class="il-consumer">'
             f'<span class="name">{html.escape(edge.get("from", "?"))} '

@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS dependency_edge (
     from_component TEXT NOT NULL,
     to_component   TEXT NOT NULL,
     edge_type      TEXT NOT NULL,    -- api | event | db | undocumented
+    documentation_status TEXT NOT NULL DEFAULT 'documented',
     reason         TEXT,
     created_at     TEXT NOT NULL
 );

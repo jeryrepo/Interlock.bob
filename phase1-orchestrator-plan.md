@@ -179,14 +179,18 @@ Build the central control plane for Interlock so that all other teammates can im
 - `AgentRunner` class accepts a role name, callable agent function, timeout, and output schema.
 - It calls the agent, validates output against the Pydantic schema, retries once on `ValidationError`, raises `AgentFailure` on second failure.
 - Logs role, attempt number, and outcome to stdout.
-- Stub callables for all 10 agents are defined and return hard-coded but schema-valid data.
-- A `run_workflow(conn, change_id)` function drives all stubs in order, writing to the ledger between steps.
+- Stub callables cover implementation and verification only. Discovery and
+  planning always consume real fixture evidence so component names are never
+  hardcoded.
+- A `run_workflow(conn, change_id)` function drives the selected callables,
+  writing validated results to the ledger between steps.
 
 **Todo List:**
 1. Define `AgentFailure(Exception)`.
 2. Implement `AgentRunner(role, fn, output_schema, timeout=30)`.
 3. Implement `AgentRunner.run(context: dict) -> BaseModel` — try/validate/retry logic.
-4. Write stub callables: `stub_repo_map`, `stub_api_contract_discovery`, `stub_event_contract_discovery`, `stub_db_schema_discovery`, `stub_compatibility_strategy`, `stub_provider_patch`, `stub_consumer_migration_fn`, `stub_contract_test`, `stub_coexistence_rehearsal`, `stub_critic` — each returns a valid Pydantic result object.
+4. Keep fast schema-valid stubs only for mutation and verification; discovery
+   and planning remain evidence-driven in every mode.
 5. Implement `run_workflow(conn, change_id)` — iterate states, run stubs, write results to ledger via `ledger.py`, call `advance()` after each phase.
 
 **Relevant Context:**

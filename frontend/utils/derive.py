@@ -153,7 +153,11 @@ def split_consumers(graph: dict | None) -> tuple[list[str], list[str]]:
         target = edge.get("to")
         if not target:
             continue
-        if edge.get("edge_type") in UNDOCUMENTED_EDGE_TYPES:
+        undocumented_edge = (
+            edge.get("documentation_status") == "undocumented"
+            or edge.get("edge_type") in UNDOCUMENTED_EDGE_TYPES
+        )
+        if undocumented_edge:
             undocumented.add(target)
         else:
             documented.add(target)
@@ -169,7 +173,10 @@ def hidden_dependencies(graph: dict | None) -> list[dict]:
     return [
         e
         for e in graph.get("edges", [])
-        if e.get("edge_type") in UNDOCUMENTED_EDGE_TYPES
+        if (
+            e.get("documentation_status") == "undocumented"
+            or e.get("edge_type") in UNDOCUMENTED_EDGE_TYPES
+        )
     ]
 
 
@@ -202,14 +209,20 @@ def contract_test_results(evidence: list[dict]) -> list[dict]:
     return [
         r
         for r in verification_results(evidence)
-        if "tests_passed" in (r.get("content") or {})
+        if (
+            "tests_passed" in (r.get("content") or {})
+            or (
+                "returncode" in (r.get("content") or {})
+                and r.get("subject") not in {"coexistence", "coexistence-rehearsal"}
+            )
+        )
     ]
 
 
 def coexistence_result(evidence: list[dict]) -> dict | None:
     """The coexistence rehearsal evidence row, if the backend produced one."""
     for row in evidence:
-        if row.get("subject") == "coexistence-rehearsal":
+        if row.get("subject") in {"coexistence", "coexistence-rehearsal"}:
             return row
     return None
 

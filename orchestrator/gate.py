@@ -6,15 +6,11 @@ Deterministic safety gate for Interlock.
 evaluate_gate() is pure read-only Python — zero LLM involvement.
 The critic agent CANNOT override the result of this function.
 
-Canonical edge direction: consumer -> provider.  A dependency_edge row
-reads ``from_component = checkout``, ``to_component = account-service``.
-This matches what the discovery agents emit and what the planning agent
-consumes via ``nx.ancestors(provider)``.
+Canonical edge direction: provider -> consumer.  A dependency_edge row
+reads ``from_component = account-service``, ``to_component = checkout``.
 
 Gate logic:
-  1. Find all consumers that depend on the provider (account-service)
-     via dependency_edge rows: collect from_component where
-     to_component == PROVIDER.
+  1. Find every direct and transitive consumer reachable from the provider.
   2. Every required consumer must have a consumer_migration row with
      status == "verified".
   3. Any consumer missing a row → NOT_PROVEN_SAFE.
@@ -59,18 +55,18 @@ def get_required_consumers(conn: sqlite3.Connection, change_id: str) -> list[str
     """
     Return sorted list of component names that depend on the provider.
 
-    Canonical edge direction: consumer -> provider.
-        from_component = consumer  (the component that depends on the field)
-        to_component   = provider  (the component that exposes the field)
+    Canonical edge direction: provider -> consumer.
 
-    e.g. ``checkout -> account-service``.  Consumers are therefore read off
-    the ``from_component`` end of edges whose ``to_component`` is the provider.
+    e.g. ``account-service -> checkout``.
     """
     deps = ledger.get_dependencies(conn, change_id)
-    consumers = sorted(
-        {d["from_component"] for d in deps if d["to_component"] == PROVIDER}
+    graph = nx.DiGraph(
+        (dependency["from_component"], dependency["to_component"])
+        for dependency in deps
     )
-    return consumers
+    if PROVIDER not in graph:
+        return []
+    return sorted(nx.descendants(graph, PROVIDER))
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +144,7 @@ def build_graph(conn: sqlite3.Connection, change_id: str) -> dict:
             dep["from_component"],
             dep["to_component"],
             edge_type=dep["edge_type"],
+            documentation_status=dep.get("documentation_status", "documented"),
             reason=dep.get("reason") or "",
         )
 
@@ -157,6 +154,7 @@ def build_graph(conn: sqlite3.Connection, change_id: str) -> dict:
             "from": u,
             "to": v,
             "edge_type": data.get("edge_type", ""),
+            "documentation_status": data.get("documentation_status", "documented"),
             "reason": data.get("reason", ""),
         }
         for u, v, data in G.edges(data=True)

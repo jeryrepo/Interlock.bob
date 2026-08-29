@@ -16,7 +16,7 @@ Coverage:
   - no dependencies → ValueError
   - provider absent from graph → ValueError
   - provider step is always first
-  - incoming evidence is forwarded in the result
+  - incoming evidence is not duplicated in the result
 """
 
 from __future__ import annotations
@@ -116,8 +116,8 @@ class TestEvidence:
             assert "source_ref" in ev
             assert ev.get("confidence") in {"hypothesis", "confirmed", "refuted"}
 
-    def test_incoming_evidence_forwarded(self):
-        """Incoming evidence from discovery must appear in the result."""
+    def test_incoming_evidence_not_duplicated(self):
+        """Discovery evidence is already persisted and must not be re-emitted."""
         incoming = {
             "claim_type": "dependency",
             "subject": "svc-a",
@@ -126,14 +126,15 @@ class TestEvidence:
             "confidence": "confirmed",
             "source_revision": "abc1234",
         }
-        # Canonical edge: consumer (svc-a) -> provider (account-service)
+        # Canonical edge: provider (account-service) -> consumer (svc-a)
         data = {
             "change_request": {"id": "cr-x", "old_field": "customer_id", "new_field": "account_id", "provider": "account-service"},
-            "dependencies": [{"from_component": "svc-a", "to_component": "account-service", "edge_type": "api", "reason": None}],
+            "dependencies": [{"from_component": "account-service", "to_component": "svc-a", "edge_type": "api", "reason": None}],
             "evidence": [incoming],
         }
         result = run(data)
-        assert incoming in result["evidence"]
+        assert incoming not in result["evidence"]
+        assert len(result["evidence"]) == 1
 
 
 class TestNoHardcoding:
@@ -251,22 +252,19 @@ class TestCanonicalEdgeDirection:
     """
     Regression tests verifying correct canonical edge direction.
 
-    Canonical contract: consumer -> provider
-      from_component = consumer
-      to_component   = provider
+    Canonical contract: provider -> consumer
+      from_component = provider
+      to_component   = consumer
 
-    Graph (consumer -> provider direction):
-      service-alpha -> account-service   (direct consumer)
-      service-beta  -> account-service   (direct consumer)
-      service-gamma -> service-beta      (transitive: gamma uses beta's field)
+    Graph (provider -> consumer direction):
+      account-service -> service-alpha   (direct consumer)
+      account-service -> service-beta    (direct consumer)
+      service-beta    -> service-gamma   (transitive: gamma uses beta's field)
 
     All three nodes must be affected consumers.
 
-    Migration order: service-gamma must come BEFORE service-beta.
-    service-gamma consumes service-beta's field; service-beta cannot drop
-    its old field until service-gamma has already migrated away from it.
-    So the correct order is: service-gamma, then service-beta (and service-alpha),
-    then account-service (last: removes old field once all consumers are done).
+    Migration rollout order follows the dependency DAG: service-beta opens its
+    compatibility window before its downstream service-gamma migrates.
 
     An unrelated node (svc-unrelated, consumer of other-service) must be excluded.
     """
@@ -286,10 +284,9 @@ class TestCanonicalEdgeDirection:
         result = run(canonical_transitive_input)
         assert components_in_steps(result)[0] == "account-service"
 
-    def test_transitive_consumer_before_its_dependency(self, canonical_transitive_input):
+    def test_dependency_before_transitive_consumer(self, canonical_transitive_input):
         """
-        service-gamma depends on service-beta's field; service-gamma must
-        migrate FIRST (before service-beta can drop its old field).
+        service-beta must migrate before its downstream service-gamma.
         """
         result = run(canonical_transitive_input)
         steps = components_in_steps(result)
@@ -297,22 +294,19 @@ class TestCanonicalEdgeDirection:
         assert "service-gamma" in steps
         beta_idx = steps.index("service-beta")
         gamma_idx = steps.index("service-gamma")
-        assert gamma_idx < beta_idx, (
-            f"service-gamma (idx {gamma_idx}) must precede service-beta (idx {beta_idx}): "
-            f"gamma must migrate before beta can remove the old field"
+        assert beta_idx < gamma_idx, (
+            f"service-beta (idx {beta_idx}) must precede service-gamma (idx {gamma_idx})"
         )
 
-    def test_transitive_before_direct(self, canonical_transitive_input):
+    def test_direct_before_transitive(self, canonical_transitive_input):
         """
-        service-gamma is transitive (furthest from provider); it must migrate
-        before the direct consumers (service-beta) that it depends on.
+        service-gamma is transitive and must follow service-beta.
         """
         result = run(canonical_transitive_input)
         steps = components_in_steps(result)
         gamma_idx = steps.index("service-gamma")
-        assert steps.index("service-beta") > gamma_idx, (
-            f"service-gamma must appear before service-beta "
-            f"(gamma depends on beta's field and must migrate first)"
+        assert steps.index("service-beta") < gamma_idx, (
+            "service-beta must appear before its downstream service-gamma"
         )
 
     def test_unrelated_component_excluded(self, canonical_transitive_input):

@@ -9,7 +9,7 @@ what the module-level default is set to for production use.
 
 Gate flow under test:
   POST /change-requests → status=COORDINATE
-  POST /approve coordinate → status=GATE_DECISION
+  POST /approve coordinate → response=MODIFY, background workflow reaches APPROVE
   POST /approve legacy_removal → status=DONE
 """
 import pytest
@@ -30,11 +30,12 @@ def force_stub_mode(monkeypatch):
 @pytest.fixture
 def client():
     """TestClient backed by a fresh in-memory database."""
-    conn = ledger.init_db(":memory:")
-    app.state.conn = conn
     with TestClient(app, raise_server_exceptions=True) as c:
+        app.state.conn.close()
+        conn = ledger.init_db(":memory:")
+        app.state.conn = conn
         yield c
-    conn.close()
+        conn.close()
 
 
 @pytest.fixture
@@ -56,7 +57,8 @@ def at_approve(client, posted):
         json={"gate": "coordinate", "approved_by": "alice"},
     )
     assert resp.status_code == 200
-    assert resp.json()["new_status"] == "APPROVE"
+    assert resp.json()["new_status"] == "MODIFY"
+    assert client.get(f"/change-requests/{posted['id']}").json()["status"] == "APPROVE"
     return posted
 
 
@@ -143,14 +145,16 @@ class TestApprove:
     # Coordinate gate
     # ------------------------------------------------------------------
 
-    def test_approve_coordinate_advances_to_approve(self, client, posted):
-        """Approving coordinate runs MODIFY/REHEARSE/VERIFY and, when VERIFIED, reaches APPROVE."""
+    def test_approve_coordinate_schedules_work_from_modify(self, client, posted):
+        """Approval returns promptly from MODIFY; background work reaches APPROVE."""
         resp = client.post(
             f"/change-requests/{posted['id']}/approve",
             json={"gate": "coordinate", "approved_by": "alice"},
         )
         assert resp.status_code == 200
-        assert resp.json()["new_status"] == "APPROVE"
+        assert resp.json()["new_status"] == "MODIFY"
+        current = client.get(f"/change-requests/{posted['id']}").json()
+        assert current["status"] == "APPROVE"
 
     def test_approve_coordinate_wrong_state_returns_409(self, client, done):
         """Change is in DONE — approving coordinate gate must be rejected."""
@@ -190,7 +194,7 @@ class TestApprove:
         ledger.create_change(conn, cid, "test")
 
         # Seed graph: checkout depends on account-service
-        ledger.add_dependency(conn, cid, "checkout", "account-service", "api")
+        ledger.add_dependency(conn, cid, "account-service", "checkout", "api")
 
         # Advance to PLANNING and seed consumer row
         sm.advance(conn, cid)  # INTAKE → DISCOVERY
@@ -227,7 +231,7 @@ class TestApprove:
         ledger.create_change(conn, cid, "test")
 
         # Dependency exists but NO consumer_migration row
-        ledger.add_dependency(conn, cid, "checkout", "account-service", "api")
+        ledger.add_dependency(conn, cid, "account-service", "checkout", "api")
         sm.force_state(conn, cid, "APPROVE")
 
         resp = client.post(
@@ -272,7 +276,8 @@ class TestApprove:
             json={"gate": "coordinate", "approved_by": "alice"},
         )
         assert resp.status_code == 200
-        assert resp.json()["new_status"] == "APPROVE"
+        assert resp.json()["new_status"] == "MODIFY"
+        assert client.get(f"/change-requests/{cid}").json()["status"] == "APPROVE"
 
         # Legacy removal gate
         resp = client.post(

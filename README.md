@@ -71,10 +71,12 @@ sidebar if a panel looks a step behind.
 2. The agent feed reports discovery. `analytics-worker` surfaces as a
    **hidden dependency** — found in source, absent from the API contract — and
    is drawn as a dashed amber edge in the dependency graph.
-3. The gate reads **PENDING**; migration progress is 0/3.
+3. The gate reads **PENDING**; migration progress is 0/4.
 4. **Approve coordination plan** → provider patch, consumer migrations,
    coexistence rehearsal, contract tests, critic.
-5. The gate flips to **VERIFIED**, 3/3 consumers verified.
+5. With Docker available, the gate flips to **VERIFIED**, 4/4 consumers verified.
+   Without Docker, it correctly remains at `REHEARSE`; install/start Docker and
+   use **Resume workflow** rather than treating a skipped rehearsal as proof.
 6. **Approve legacy field removal** → state `DONE`, and the **Change Passport**
    summarises the whole change with evidence behind every line.
 
@@ -104,6 +106,7 @@ database access. It is a pure HTTP client and calls exactly these endpoints:
 | `GET  /change-requests/{id}/gate` | Deterministic gate decision + consumer status |
 | `GET  /change-requests/{id}/approvals` | Recorded human approvals |
 | `POST /change-requests/{id}/approve` | Approve the `coordinate` or `legacy_removal` gate |
+| `POST /change-requests/{id}/resume` | Retry an interrupted `MODIFY` or `REHEARSE` phase |
 
 ### Workflow states
 
@@ -131,9 +134,6 @@ To run the backend against a scratch database:
 $env:INTERLOCK_DB_PATH="scratch/demo.db"; uvicorn orchestrator.main:app --reload
 ```
 
-> `.env.example` currently lists `ORCHESTRATOR_DB_PATH`, but the code reads
-> `INTERLOCK_DB_PATH` (`orchestrator/main.py`). Trust the table above.
-
 ---
 
 ## Tests
@@ -151,16 +151,12 @@ Full suite (~2 minutes):
 python -m pytest -q
 ```
 
-**Known issue:** four tests in `tests/implementation/test_consumer_migration.py`
-fail in a full-suite run but pass when that file runs alone — a test-ordering
-problem in that module, not a product bug:
-
-```bash
-python -m pytest tests/implementation/test_consumer_migration.py -q
-```
-
 `pytest.ini` sets `--basetemp=.pytest_tmp` to avoid Windows temp-permission
-errors; that directory is gitignored.
+
+The root suite excludes `fixtures/` because each fixture is a standalone test
+repository with its own `tests` package. Run a fixture from inside its directory,
+or let the contract-test agent / Docker rehearsal run it. Real workflow edits
+occur in a per-change temporary workspace; the checked-out fixtures stay clean.
 
 ---
 

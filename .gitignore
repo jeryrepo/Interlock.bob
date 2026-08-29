@@ -158,3 +158,6 @@ htmlcov/
 uvicorn.log
 streamlit.log
 scratch/
+
+# Accidental nested checkout created by local tooling; never collect or commit it.
+Projects/

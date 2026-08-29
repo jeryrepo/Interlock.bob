@@ -70,6 +70,9 @@ Never fabricate a commit.
 
 ## consumer-migration
 Modify real consumer repositories:
+
+The orchestrator supplies per-change isolated copies. Never edit or commit the
+checked-out canonical fixtures during a live workflow.
 - checkout
 - fraud
 - analytics-worker

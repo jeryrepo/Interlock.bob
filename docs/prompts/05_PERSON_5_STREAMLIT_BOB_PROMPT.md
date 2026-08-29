@@ -28,6 +28,7 @@ GET  /change-requests/{id}
 GET  /change-requests/{id}/evidence
 GET  /change-requests/{id}/graph
 POST /change-requests/{id}/approve
+POST /change-requests/{id}/resume
 ```
 
 Polling every 1-2 seconds is acceptable. Do not introduce WebSockets.

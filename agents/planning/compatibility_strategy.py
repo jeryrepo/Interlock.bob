@@ -110,15 +110,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
     # ------------------------------------------------------------------
     # Build directed graph
-    # Canonical contract: consumer -> provider
-    #   from_component = consumer  (the node that depends on the field)
-    #   to_component   = provider  (the node that exposes the field)
-    # So g.add_edge(from_component, to_component) produces edges that
-    # flow FROM consumers TOWARD the provider:
-    #   checkout         -> account-service
-    #   fraud            -> account-service
-    #   analytics-worker -> account-service
-    # Upstream consumers are therefore reachable via nx.ancestors.
+    # Canonical contract: provider -> consumer.
     # ------------------------------------------------------------------
     g: nx.DiGraph = nx.DiGraph()
     db_edge_sources: set[str] = set()
@@ -128,7 +120,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
         dst = dep["to_component"]
         g.add_edge(src, dst)
         if dep.get("edge_type") == "db":
-            db_edge_sources.add(src)   # consumer (from_component) is the db-edge dependent
+            db_edge_sources.add(dst)
 
     # ------------------------------------------------------------------
     # Validate: provider must appear as a node
@@ -150,11 +142,9 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
         )
 
     # ------------------------------------------------------------------
-    # Find all consumers: nodes that can REACH the provider via directed edges.
-    # With canonical edges (consumer -> provider), nx.ancestors(g, provider)
-    # returns every component that directly or transitively depends on it.
+    # Find all downstream consumers of the provider.
     # ------------------------------------------------------------------
-    consumers: set[str] = nx.ancestors(g, provider)
+    consumers: set[str] = nx.descendants(g, provider)
 
     if not consumers:
         # Provider exists but nothing depends on it — plan is trivially provider-only.
@@ -162,12 +152,8 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
     # ------------------------------------------------------------------
     # Sort consumers topologically.
-    # With canonical edges (consumer -> ... -> provider), we need consumers
-    # to be migrated in dependency order: a consumer that another consumer
-    # depends on (transitively toward the provider) must come first.
-    # nx.topological_sort on the consumer-to-provider graph puts the most
-    # upstream consumers (closest to the provider) LAST.  We reverse this
-    # to get "direct consumers before their own dependents" ordering.
+    # Topological order naturally places the provider and direct consumers
+    # before their own downstream dependants.
     # ------------------------------------------------------------------
     full_topo = list(nx.topological_sort(g))  # most-upstream consumers last
     consumer_order = [n for n in full_topo if n in consumers]
@@ -243,19 +229,19 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     # ------------------------------------------------------------------
     # Evidence — one entry per consumer, citing the dependency source
     # ------------------------------------------------------------------
-    # Canonical edge direction: consumer is from_component, provider is to_component.
+    # Canonical edge direction: provider is from_component, consumer is to_component.
     dep_lookup: dict[tuple[str, str], dict] = {
         (d["from_component"], d["to_component"]): d for d in deps
     }
     result_evidence: list[_Evidence] = []
     for consumer in consumer_order:
-        # Prefer the direct edge from consumer to provider; fall back to any
-        # edge whose from_component is this consumer (covers transitive cases).
-        direct_key = (consumer, provider)
+        # Prefer the direct provider-to-consumer edge; fall back to any edge
+        # whose to_component is this consumer for transitive cases.
+        direct_key = (provider, consumer)
         dep_for_consumer = dep_lookup.get(direct_key)
         if dep_for_consumer is None:
             dep_for_consumer = next(
-                (d for d in deps if d["from_component"] == consumer), None
+                (d for d in deps if d["to_component"] == consumer), None
             )
         source_ref = (
             dep_for_consumer.get("reason") or f"dependency:{provider}->{consumer}"
@@ -274,9 +260,9 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
         })
 
     # ------------------------------------------------------------------
-    # Merge any incoming evidence alongside our derived evidence
-    # ------------------------------------------------------------------
-    all_evidence = list(incoming_evidence) + result_evidence
+    # Discovery evidence is already persisted by the orchestrator. Re-emitting
+    # it here duplicates ledger rows and makes the activity feed misleading.
+    all_evidence = result_evidence
 
     affected_consumers = list(consumer_order)
 

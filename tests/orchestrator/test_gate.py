@@ -15,13 +15,12 @@ from orchestrator.gate import evaluate_gate, get_required_consumers, build_graph
 
 def _seed_graph(conn, change_id, consumers):
     """
-    Add dependency edges from each consumer to account-service.
+    Add dependency edges from account-service to each consumer.
 
-    Canonical direction is consumer -> provider, so the consumer is the
-    from_component and account-service is the to_component on every edge.
+    Canonical direction is provider -> consumer.
     """
     for consumer in consumers:
-        ledger.add_dependency(conn, change_id, consumer, "account-service", "api")
+        ledger.add_dependency(conn, change_id, "account-service", consumer, "api")
 
 
 class TestGetRequiredConsumers:
@@ -31,13 +30,25 @@ class TestGetRequiredConsumers:
         assert set(consumers) == {"checkout", "fraud"}
 
     def test_ignores_edges_not_to_provider(self, conn, change):
-        # Edge from checkout to some-other-service — to_component is not "account-service"
+        # Edge from some-other-service to checkout does not originate at the provider.
         ledger.add_dependency(conn, change["id"], "checkout", "some-other-service", "api")
         consumers = get_required_consumers(conn, change["id"])
         assert consumers == []
 
     def test_no_edges_returns_empty(self, conn, change):
         assert get_required_consumers(conn, change["id"]) == []
+
+    def test_includes_transitive_consumers(self, conn, change):
+        ledger.add_dependency(
+            conn, change["id"], "account-service", "event-router", "event"
+        )
+        ledger.add_dependency(
+            conn, change["id"], "event-router", "warehouse", "event"
+        )
+        assert get_required_consumers(conn, change["id"]) == [
+            "event-router",
+            "warehouse",
+        ]
 
 
 class TestEvaluateGate:
@@ -93,7 +104,8 @@ class TestEvaluateGate:
         """
         _seed_graph(conn, change["id"], ["checkout", "fraud"])
         ledger.add_dependency(
-            conn, change["id"], "analytics-worker", "account-service", "undocumented"
+            conn, change["id"], "account-service", "analytics-worker", "event",
+            documentation_status="undocumented",
         )
         # Only checkout and fraud verified, analytics-worker missing
         ledger.upsert_consumer_migration(conn, change["id"], "checkout", "verified")
@@ -120,9 +132,11 @@ class TestBuildGraph:
 
     def test_edge_has_type(self, conn, change):
         ledger.add_dependency(
-            conn, change["id"], "analytics-worker", "account-service", "undocumented", "source scan"
+            conn, change["id"], "account-service", "analytics-worker", "event",
+            "source scan", "undocumented",
         )
         graph = build_graph(conn, change["id"])
         edge = graph["edges"][0]
-        assert edge["edge_type"] == "undocumented"
+        assert edge["edge_type"] == "event"
+        assert edge["documentation_status"] == "undocumented"
         assert edge["reason"] == "source scan"

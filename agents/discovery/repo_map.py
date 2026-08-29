@@ -7,11 +7,9 @@ Walks every repository under fixtures_root and produces a structured
 inventory of components, source files, OpenAPI specs, schema/migration
 files, and field references.
 
-Canonical edge direction:
-  from_component = consumer  (the component that references the field)
-  to_component   = provider  (the component that owns/exposes the field)
-
-e.g. checkout -> account-service  (checkout depends on account-service)
+This agent emits inventory evidence only. Specialized discovery agents own
+dependency classification so one reference cannot create duplicate, competing
+edges.
 
 Returns a dict that validates as DiscoveryResult.
 Does NOT write to the database directly.
@@ -23,7 +21,7 @@ import ast
 from pathlib import Path
 from typing import Any
 
-from orchestrator.schemas import Dependency, DiscoveryResult, Evidence
+from orchestrator.schemas import DiscoveryResult, Evidence
 
 # File extension categories
 _SOURCE_EXTS = {".py"}
@@ -208,23 +206,9 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-        # Emit a dependency edge for each component that references the target field.
-        # Canonical direction: consumer -> provider.
-        # Skip self-edges: account-service owns the field, so finding customer_id
-        # references inside account-service itself is expected and must never be
-        # recorded as a dependency of account-service on itself.
-        if summary["field_refs"] and name != "account-service":
-            dependencies.append(
-                Dependency(
-                    from_component=name,
-                    to_component="account-service",
-                    edge_type="undocumented",
-                    reason=(
-                        f"Source inspection found {len(summary['field_refs'])} "
-                        f"reference(s) to '{old_field}' in {name}"
-                    ),
-                )
-            )
+        # repo-map inventories references; the specialised discovery agents own
+        # dependency classification so the ledger never contains competing
+        # duplicate edges whose type depends on execution order.
 
     result = DiscoveryResult(
         change_id=change_id,

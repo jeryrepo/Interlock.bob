@@ -99,8 +99,14 @@ class Dependency(BaseModel):
     from_component: str
     to_component: str
     edge_type: Literal["api", "event", "db", "undocumented"]
+    documentation_status: Literal["documented", "undocumented"] = "documented"
     reason: str | None = None
 ```
+
+The canonical direction is **provider → consumer**. For example,
+`account-service → checkout`. Mechanism (`edge_type="event"`) and documentation
+status are separate facts; the hidden analytics edge is an undocumented event
+edge, not a replacement edge type.
 
 Every agent returns a validated result object. Exact final schemas belong to Person 1.
 

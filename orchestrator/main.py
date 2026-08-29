@@ -9,6 +9,7 @@ Endpoints:
   GET  /change-requests/{id}/evidence
   GET  /change-requests/{id}/graph
   POST /change-requests/{id}/approve
+  POST /change-requests/{id}/resume
 
 All responses use stable Pydantic response models.
 Start with: uvicorn orchestrator.main:app --reload
@@ -17,17 +18,20 @@ Start with: uvicorn orchestrator.main:app --reload
 from __future__ import annotations
 
 import os
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 import orchestrator.ledger as ledger
 import orchestrator.state_machine as sm
 from orchestrator.agent_runner import run_workflow
 from orchestrator.gate import build_graph, evaluate_gate
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -136,6 +140,32 @@ def _get_conn():
     return app.state.conn
 
 
+def _run_workflow_safely(change_id: str) -> None:
+    """Run background workflow work and persist an explicit failure record."""
+    shared_conn = _get_conn()
+    database_file = shared_conn.execute("PRAGMA database_list").fetchone()["file"]
+    conn = ledger.init_db(database_file) if database_file else shared_conn
+    try:
+        run_workflow(conn, change_id)
+    except Exception as exc:  # the error must remain visible and resumable
+        state = sm.get_state(conn, change_id)
+        logger.exception("Workflow failed for change %s in state %s", change_id, state)
+        ledger.add_evidence(
+            conn,
+            change_id,
+            "risk",
+            "workflow-error",
+            {"state": state, "error": str(exc), "resumable": state in {"MODIFY", "REHEARSE"}},
+            "orchestrator/main.py",
+            "confirmed",
+            None,
+        )
+        ledger.update_change_status(conn, change_id, state, increment_retry=True)
+    finally:
+        if conn is not shared_conn:
+            conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -195,12 +225,16 @@ def get_graph(change_id: str):
 
 
 @app.post("/change-requests/{change_id}/approve", response_model=ApprovalResponse)
-def approve_change_request(change_id: str, body: ApproveRequest):
+def approve_change_request(
+    change_id: str,
+    body: ApproveRequest,
+    background_tasks: BackgroundTasks,
+):
     """
     Record a human approval at a named gate and advance the state machine.
 
     coordinate gate (state must be COORDINATE):
-      - Records approval, advances to MODIFY, then resumes agent workflow
+      - Records approval, advances to MODIFY, then schedules the agent workflow
         through MODIFY/REHEARSE/VERIFY/GATE_DECISION.
       - If gate is VERIFIED, automatically advances to APPROVE and stops.
       - If gate is NOT_PROVEN_SAFE, stops at GATE_DECISION.
@@ -261,15 +295,35 @@ def approve_change_request(change_id: str, body: ApproveRequest):
     except sm.InvalidTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    # After coordinate approval: resume agent workflow from MODIFY.
+    # After coordinate approval, return promptly and perform long-running
+    # migrations/tests after the HTTP response is created. The client polls the
+    # authoritative state projections for progress.
     if gate == "coordinate":
-        run_workflow(conn, change_id)
-        new_state = sm.get_state(conn, change_id)
+        background_tasks.add_task(_run_workflow_safely, change_id)
 
     return ApprovalResponse(
         **approval,
         new_status=new_state,
     )
+
+
+@app.post("/change-requests/{change_id}/resume", response_model=ChangeResponse)
+def resume_change_request(change_id: str, background_tasks: BackgroundTasks):
+    """Retry a workflow that stopped during MODIFY or REHEARSE."""
+    conn = _get_conn()
+    row = ledger.get_change(conn, change_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Change '{change_id}' not found.")
+    if row["status"] not in {"MODIFY", "REHEARSE"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Resume requires state 'MODIFY' or 'REHEARSE', "
+                f"but change is in '{row['status']}'."
+            ),
+        )
+    background_tasks.add_task(_run_workflow_safely, change_id)
+    return ChangeResponse(**row)
 
 
 # ---------------------------------------------------------------------------

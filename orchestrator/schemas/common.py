@@ -31,4 +31,5 @@ class Dependency(BaseModel):
     from_component: str
     to_component: str
     edge_type: Literal["api", "event", "db", "undocumented"]
+    documentation_status: Literal["documented", "undocumented"] = "documented"
     reason: str | None = None

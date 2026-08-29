@@ -79,7 +79,7 @@ The repo-map agent does a filesystem walk of every repository under `fixtures/` 
 - `agents/discovery/repo_map.py` is fully implemented
 - `run(data)` accepts `{"change_id": str, "fixtures_root": str}` and returns a dict matching `DiscoveryResult`
 - Discovers all five fixture directories dynamically (no hardcoded names)
-- Produces `Dependency` edges for every repo found
+- Produces repository inventory evidence; specialized agents own dependency edges
 - Produces `Evidence` items with `source_ref` pointing to real file paths
 - Returns valid `DiscoveryResult` (Pydantic validates successfully)
 
@@ -89,9 +89,9 @@ The repo-map agent does a filesystem walk of every repository under `fixtures/` 
 3. Walk each subdirectory of `fixtures_root` as a component
 4. For each component, collect: list of `.py` source files, list of `.yaml`/`.yml` files, list of `.sql`/migration files, `Dockerfile` presence
 5. Scan all collected files for occurrences of `customer_id` (using `ast.walk` for `.py` files, line-grep for others) — record file path and line number as `source_ref`
-6. Emit one `Dependency(from_component=component, to_component="account-service", edge_type="undocumented")` for each component that references `customer_id` (agent does not interpret what kind — that's for the specialized agents)
-7. Emit one `Evidence` per component with `claim_type="dependency"`, `content={"files": [...], "openapi": [...], "sql": [...]}`, real `source_ref`
-8. Wrap everything into `DiscoveryResult(change_id=..., evidence=[...], dependencies=[...]).model_dump()` and return
+6. Emit one `Evidence` per component with `claim_type="dependency"`, `content={"files": [...], "openapi": [...], "sql": [...]}`, real `source_ref`
+7. Return `dependencies=[]`; otherwise generic scan edges duplicate and can overwrite the API/event/DB classification supplied by specialized agents
+8. Wrap everything into `DiscoveryResult(change_id=..., evidence=[...], dependencies=[]).model_dump()` and return
 
 **Relevant Context:**
 - `orchestrator/schemas/discovery.py` — `DiscoveryResult` model

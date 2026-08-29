@@ -46,21 +46,6 @@ from orchestrator.schemas.verification import VerificationResult
 
 
 # ---------------------------------------------------------------------------
-# Known real component names that must have commit-backed migration evidence.
-# Planning-stage summary entries (e.g. "migration-plan") are intentionally
-# excluded — they are never expected to carry a source_revision.
-# ---------------------------------------------------------------------------
-
-_REAL_COMPONENTS: frozenset[str] = frozenset(
-    {
-        "account-service",
-        "checkout",
-        "fraud",
-        "analytics-worker",
-    }
-)
-
-# ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
@@ -152,16 +137,16 @@ def _check_missing_commit_refs(
     Flag a risk for any ``migration_status`` evidence item that lacks a
     ``source_revision`` (i.e. no real commit SHA was recorded).
 
-    Only applied to evidence whose ``subject`` is a known real component
-    (see ``_REAL_COMPONENTS``).  Planning-stage summary entries such as
-    ``"migration-plan"`` are intentionally skipped — a plan is never
-    expected to reference an implementation commit.
+    Planning and orchestration metadata entries are skipped. Component names
+    are learned from evidence instead of being hardcoded, so a newly discovered
+    consumer receives the same scrutiny automatically.
     """
     risks: list[Evidence] = []
     for item in evidence_items:
         if item.get("claim_type") != "migration_status":
             continue
-        if item.get("subject") not in _REAL_COMPONENTS:
+        subject = item.get("subject", "")
+        if subject == "migration-plan" or subject.startswith("_"):
             continue
         if not item.get("source_revision"):
             risks.append(

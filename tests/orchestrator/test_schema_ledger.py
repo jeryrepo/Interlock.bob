@@ -103,8 +103,11 @@ class TestAddDependency:
         assert dep["edge_type"] == "api"
 
     def test_get_dependencies(self, conn, change):
-        ledger.add_dependency(conn, change["id"], "fraud", "account-service", "api")
-        ledger.add_dependency(conn, change["id"], "analytics-worker", "account-service", "undocumented")
+        ledger.add_dependency(conn, change["id"], "account-service", "fraud", "api")
+        ledger.add_dependency(
+            conn, change["id"], "account-service", "analytics-worker", "event",
+            documentation_status="undocumented",
+        )
         rows = ledger.get_dependencies(conn, change["id"])
         assert len(rows) == 2
 

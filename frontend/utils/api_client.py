@@ -13,6 +13,7 @@ read from one of these endpoints:
     GET  /change-requests/{id}/gate
     GET  /change-requests/{id}/approvals
     POST /change-requests/{id}/approve
+    POST /change-requests/{id}/resume
 
 Failures are surfaced as ApiError and are NEVER converted into fake success
 values.  The caller is expected to render the error.
@@ -148,6 +149,10 @@ class InterlockClient:
             f"/change-requests/{change_id}/approve",
             json={"gate": gate, "approved_by": approved_by},
         )
+
+    def resume(self, change_id: str) -> dict:
+        """Retry workflow work that stopped during MODIFY or REHEARSE."""
+        return self._request("POST", f"/change-requests/{change_id}/resume")
 
     # -- aggregate ---------------------------------------------------------
 

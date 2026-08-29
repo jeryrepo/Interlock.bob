@@ -40,7 +40,7 @@ run(data: dict, repo_path: Path) -> VerificationResult
 - `commit_ref: str | None` — the migration commit SHA (goes into `source_revision`)
 
 Internally:
-1. Invoke `subprocess.run(["python", "-m", "pytest", str(repo_path), "-v", "--tb=short"])`.
+1. Invoke `subprocess.run([sys.executable, "-m", "pytest", str(repo_path), "-v", "--tb=short"])` with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`.
 2. Capture stdout+stderr.
 3. Parse returncode: 0 → `status="verified"`, non-zero → `status="failed"`.
 4. Build one `Evidence(claim_type="test_result", ...)` from the real output.
@@ -84,10 +84,10 @@ run(data: dict, compose_file: Path) -> VerificationResult
 - `scenario: Literal["old_consumers", "migrated_consumers"]` — which half to run
 
 Internally:
-1. `subprocess.run(["docker", "compose", "-f", str(compose_file), "up", "--abort-on-container-exit", "--exit-code-from", <service>])` 
-   — but since checkout/fraud/analytics-worker containers run `pytest` and exit, use `--exit-code-from` for the relevant service.
+1. Parse the Compose service list and run each service with `docker compose run --build --rm --no-deps <service>`.
+   Running every service sequentially avoids accepting a fast zero exit while a slower suite is aborted.
 2. Capture stdout+stderr.
-3. Non-zero exit → `status="failed"`.
+3. Non-zero exit, timeout, or unavailable Docker → `status="failed"` and the workflow remains at `REHEARSE`.
 4. Return `VerificationResult` with `claim_type="test_result"` evidence.
 
 ### Docker Compose Architecture
