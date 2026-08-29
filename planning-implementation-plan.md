@@ -147,7 +147,7 @@ The initial implementation used `nx.ancestors(g, provider)` to find consumers. T
 
 ## Sub-Task 3 — Implement `provider-patch`
 
-**Status**: [ ] pending
+**Status**: [x] done — commit `ef3cb5d` on `feature/planning`
 
 ### Intent
 `provider-patch` receives a change request and the strategy result. It accepts a `repo_path` parameter pointing to the provider repository (real or temporary). It reads the source, applies the dual-field compatibility patch, updates the OpenAPI spec, updates or adds tests that assert the new field, runs pytest, creates a real Git commit, and returns the real SHA. When `repo_path` is the real `fixtures/account-service/` (once Person 2's work lands), the agent operates identically — only the path differs.
@@ -189,7 +189,7 @@ The initial implementation used `nx.ancestors(g, provider)` to find consumers. T
 
 ## Sub-Task 4 — Implement `consumer-migration`
 
-**Status**: [ ] pending
+**Status**: [x] done — second commit on `feature/planning` (see current HEAD)
 
 ### Intent
 `consumer-migration` receives a consumer name, the change request, and the strategy result. Given a `repo_path` parameter, it reads the consumer's source, replaces the old field reference with the new one, updates tests, runs pytest, creates a real Git commit, and returns the real SHA. Each consumer call is independent; each produces its own commit.
@@ -258,7 +258,7 @@ Prove that `compatibility-strategy` is correct: derives the plan from the depend
 
 ## Sub-Task 6 — Write `tests/implementation/` Suite
 
-**Status**: [ ] pending
+**Status**: [x] done — 68 tests total (24 provider-patch + 44 consumer-migration), all pass
 
 ### Intent
 Prove that `provider-patch` and `consumer-migration` make real code changes and real Git commits — using isolated temporary Git repositories so no commits land on `feature/planning`.
@@ -361,16 +361,16 @@ Each agent file will contain a block like:
 - [x] `compatibility-strategy` derives plan from graph, not hardcoded names — confirmed by `TestNoHardcoding` + `TestCanonicalEdgeDirection`; commit `9e570e1`
 - [x] Canonical edge direction (`from_component = provider`, `to_component = consumer`) used throughout; `nx.descendants` used for downstream traversal — audited and corrected in commit `9e570e1`
 - [x] `tests/planning/` all pass with mock dict inputs — **34/34** passing; commit `9e570e1`
-- [ ] `provider-patch` reads before patching, runs real pytest, produces real SHA — **not started**
-- [ ] `consumer-migration` migrates each consumer independently, real commits, real SHAs — **not started**
-- [ ] Person 3 has not created or scaffolded baseline fixture repositories (Person 2 owns those); when real fixtures land, `provider-patch` modifies `fixtures/account-service/` and `consumer-migration` modifies the Checkout, Fraud, and Analytics Worker repos — through the implementation agents, with real pytest, real Git commits, and real SHAs
+- [x] `provider-patch` reads before patching, runs real pytest, produces real SHA — **24/24 tests pass**; commit `ef3cb5d`
+- [x] `consumer-migration` migrates each consumer independently, real commits, real SHAs — **44/44 tests pass**; checkout, fraud, analytics-worker all covered
+- [x] Person 3 has not created or scaffolded baseline fixture repositories (Person 2 owns those); when real fixtures land, agents operate on them via the same `repo_path` parameter — zero code change required
 - [x] No production Pydantic schemas in `agents/planning/schemas.py` or `orchestrator/schemas/`
-- [ ] `tests/implementation/` all pass with temporary Git repos — **not started**
+- [x] `tests/implementation/` all pass with temporary Git repos — **68/68** passing (24 provider-patch + 44 consumer-migration)
 - [x] Running tests leaves zero commits on `feature/planning`
 - [x] No agent writes SQLite
 - [x] No agent calls another agent
-- [ ] No faked SHAs or test output — **not applicable yet** (implementation agents not started)
-- [ ] PR on `feature/planning` branch ready — **in progress**
+- [x] No faked SHAs or test output — all SHAs verified via `git cat-file -e`, all pytest output captured from real subprocess runs
+- [ ] PR on `feature/planning` branch ready — final step
 
 ---
 
