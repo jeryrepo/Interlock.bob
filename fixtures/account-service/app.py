@@ -22,6 +22,7 @@ class AccountResponse:
     def to_dict(self) -> dict:
         return {
             "customer_id": self.customer_id,
+            "account_id": self.customer_id,
         }
 
 
