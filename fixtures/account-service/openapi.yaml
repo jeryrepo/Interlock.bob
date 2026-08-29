@@ -1,0 +1,25 @@
+openapi: "3.0.0"
+info:
+  title: Account Service
+  version: "1.0"
+paths:
+  /accounts/{id}:
+    get:
+      summary: Get account by customer ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Account data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  customer_id:
+                    type: string
+                    description: 'Legacy customer identifier'
