@@ -47,6 +47,11 @@ TRANSITIONS: dict[str, str] = {
 # Exceptions
 # ---------------------------------------------------------------------------
 
+# Step kinds that are proved during VERIFY rather than MODIFY. They are
+# expected to still be "pending" when MODIFY completes.
+_PROVED_AFTER_MODIFY: frozenset[str] = frozenset({"webhook_quiet"})
+
+
 class InvalidTransition(Exception):
     """Raised when an advance is attempted that cannot succeed."""
 
@@ -83,9 +88,12 @@ def can_advance(conn: sqlite3.Connection, change_id: str, current_state: str) ->
         return len(deps) > 0
 
     if current_state == "PLANNING":
-        # Need at least one consumer_migration row (planning seeded them).
-        migrations = ledger.get_consumer_migrations(conn, change_id)
-        return len(migrations) > 0
+        # Need at least one work item (planning seeded them).
+        #
+        # Reads work items across ALL step kinds, not just "migrate": a
+        # transport migration seeds "subscribe" and "webhook_quiet" instead, and
+        # filtering to "migrate" made those changes unable to leave PLANNING.
+        return len(ledger.get_work_items(conn, change_id)) > 0
 
     if current_state == "COORDINATE":
         # Requires a human approval with gate='coordinate'.
@@ -93,12 +101,20 @@ def can_advance(conn: sqlite3.Connection, change_id: str, current_state: str) ->
         return any(a["gate"] == "coordinate" for a in approvals)
 
     if current_state == "MODIFY":
-        # All consumer migrations must be at least in_progress (or further).
-        migrations = ledger.get_consumer_migrations(conn, change_id)
-        if not migrations:
+        # Every work item must be at least in_progress.
+        #
+        # Steps that no MODIFY-phase agent touches — "webhook_quiet" is proved
+        # in VERIFY, not MODIFY — would otherwise sit at "pending" forever and
+        # stall the change. They are excluded here and still gated later: the
+        # gate requires them verified regardless.
+        items = [
+            w for w in ledger.get_work_items(conn, change_id)
+            if w["step_kind"] not in _PROVED_AFTER_MODIFY
+        ]
+        if not items:
             return False
         terminal = {"in_progress", "verified", "failed"}
-        return all(m["status"] in terminal for m in migrations)
+        return all(w["status"] in terminal for w in items)
 
     if current_state == "REHEARSE":
         # Coexistence rehearsal evidence must exist.
@@ -106,12 +122,12 @@ def can_advance(conn: sqlite3.Connection, change_id: str, current_state: str) ->
         return any(e["claim_type"] == "test_result" for e in evidence)
 
     if current_state == "VERIFY":
-        # All consumer migrations must be verified or failed (no pending/in_progress).
-        migrations = ledger.get_consumer_migrations(conn, change_id)
-        if not migrations:
+        # Every work item must have reached a terminal status.
+        items = ledger.get_work_items(conn, change_id)
+        if not items:
             return False
         done = {"verified", "failed"}
-        return all(m["status"] in done for m in migrations)
+        return all(w["status"] in done for w in items)
 
     if current_state == "GATE_DECISION":
         # Gate decision must have been recorded and result must be VERIFIED.

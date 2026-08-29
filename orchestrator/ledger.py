@@ -214,7 +214,144 @@ def get_dependencies(conn: sqlite3.Connection, change_id: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# consumer_migration
+# change_spec
+# ---------------------------------------------------------------------------
+
+def set_change_spec(
+    conn: sqlite3.Connection,
+    change_id: str,
+    kind: str,
+    spec: dict,
+) -> dict:
+    """
+    Persist the structured spec for a change.  Idempotent per change_id.
+
+    The caller validates against orchestrator.schemas.ChangeSpec before calling;
+    the ledger persists, it does not validate.
+    """
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO change_spec (change_id, kind, spec, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(change_id) DO UPDATE
+            SET kind = excluded.kind, spec = excluded.spec
+        """,
+        (change_id, kind, json.dumps(spec), now),
+    )
+    conn.commit()
+    return get_change_spec(conn, change_id)
+
+
+def get_change_spec(conn: sqlite3.Connection, change_id: str) -> dict | None:
+    """
+    Return ``{"change_id", "kind", "spec": {...}, "created_at"}`` or None.
+
+    None means a legacy description-only change: the workflow falls back to
+    stubs rather than attempting to drive real agents with no inputs.
+    """
+    row = conn.execute(
+        "SELECT * FROM change_spec WHERE change_id = ?", (change_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    out = _row_to_dict(row)
+    out["spec"] = json.loads(out["spec"])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# work_item
+# ---------------------------------------------------------------------------
+
+def upsert_work_item(
+    conn: sqlite3.Connection,
+    change_id: str,
+    component: str,
+    status: str,
+    step_kind: str = "migrate",
+    detail: dict | None = None,
+) -> dict:
+    """
+    Insert or update one (change, component, step_kind) work item.
+
+    UPSERT keeps it idempotent, which matters because run_workflow() resumes
+    from persisted state and may re-run a phase.
+    """
+    now = _now()
+    existing = conn.execute(
+        "SELECT id FROM work_item "
+        "WHERE change_id = ? AND component = ? AND step_kind = ?",
+        (change_id, component, step_kind),
+    ).fetchone()
+    row_id = existing["id"] if existing else str(uuid.uuid4())
+
+    conn.execute(
+        """
+        INSERT INTO work_item
+            (id, change_id, component, step_kind, status, detail, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(change_id, component, step_kind) DO UPDATE
+            SET status = excluded.status,
+                detail = excluded.detail,
+                updated_at = excluded.updated_at
+        """,
+        (
+            row_id,
+            change_id,
+            component,
+            step_kind,
+            status,
+            json.dumps(detail or {}),
+            now,
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM work_item "
+        "WHERE change_id = ? AND component = ? AND step_kind = ?",
+        (change_id, component, step_kind),
+    ).fetchone()
+    return _work_row(row)
+
+
+def get_work_items(
+    conn: sqlite3.Connection,
+    change_id: str,
+    step_kind: str | None = None,
+) -> list[dict]:
+    """Return work items for a change, optionally filtered to one step kind."""
+    if step_kind is None:
+        rows = conn.execute(
+            "SELECT * FROM work_item WHERE change_id = ? "
+            "ORDER BY component, step_kind",
+            (change_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM work_item WHERE change_id = ? AND step_kind = ? "
+            "ORDER BY component",
+            (change_id, step_kind),
+        ).fetchall()
+    return [_work_row(r) for r in rows]
+
+
+def _work_row(row: sqlite3.Row) -> dict:
+    """Row -> dict with detail parsed back from JSON."""
+    out = _row_to_dict(row)
+    try:
+        out["detail"] = json.loads(out["detail"]) if out.get("detail") else {}
+    except (TypeError, ValueError):
+        out["detail"] = {}
+    return out
+
+
+# ---------------------------------------------------------------------------
+# consumer_migration  (back-compat facades over work_item)
+# ---------------------------------------------------------------------------
+# These keep the ledger's public surface stable so the state machine, the API
+# projections and the existing test suite need no edits.  The `component AS
+# consumer` alias is what preserves the dict shape callers expect.
 # ---------------------------------------------------------------------------
 
 def upsert_consumer_migration(
@@ -223,39 +360,24 @@ def upsert_consumer_migration(
     consumer: str,
     status: str,
 ) -> dict:
-    """
-    Insert or update a consumer migration status row.
-    Uses INSERT OR REPLACE to honour the UNIQUE(change_id, consumer) constraint.
-    """
-    now = _now()
-    # Preserve the existing id if this is an update
-    existing = conn.execute(
-        "SELECT id FROM consumer_migration WHERE change_id = ? AND consumer = ?",
-        (change_id, consumer),
-    ).fetchone()
-    row_id = existing["id"] if existing else str(uuid.uuid4())
-
-    conn.execute(
-        """
-        INSERT INTO consumer_migration (id, change_id, consumer, status, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(change_id, consumer) DO UPDATE
-            SET status = excluded.status, updated_at = excluded.updated_at
-        """,
-        (row_id, change_id, consumer, status, now),
-    )
-    conn.commit()
+    """Back-compat facade: a consumer migration is a work item with step_kind='migrate'."""
+    upsert_work_item(conn, change_id, consumer, status, step_kind="migrate")
     row = conn.execute(
-        "SELECT * FROM consumer_migration WHERE change_id = ? AND consumer = ?",
+        "SELECT id, change_id, component AS consumer, status, updated_at "
+        "FROM work_item "
+        "WHERE change_id = ? AND component = ? AND step_kind = 'migrate'",
         (change_id, consumer),
     ).fetchone()
     return _row_to_dict(row)
 
 
 def get_consumer_migrations(conn: sqlite3.Connection, change_id: str) -> list[dict]:
-    """Return all consumer_migration rows for a change."""
+    """Back-compat facade returning rows keyed `consumer`, not `component`."""
     rows = conn.execute(
-        "SELECT * FROM consumer_migration WHERE change_id = ? ORDER BY consumer",
+        "SELECT id, change_id, component AS consumer, status, updated_at "
+        "FROM work_item "
+        "WHERE change_id = ? AND step_kind = 'migrate' "
+        "ORDER BY component",
         (change_id,),
     ).fetchall()
     return _rows_to_dicts(rows)

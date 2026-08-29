@@ -55,8 +55,12 @@ logger = logging.getLogger(__name__)
 # Stub mode flag
 # ---------------------------------------------------------------------------
 
-# Set to False when real agents are integrated.  The stubs defined below
-# must not run when this is False.
+# Whether the stub workflow is available as the no-spec fallback.
+#
+# Real agents are selected per change by the presence of a change_spec row, not
+# by this flag — see orchestrator/real_workflow.py.  A change WITH a spec always
+# runs real agents regardless of this setting; a change WITHOUT one runs the
+# stubs below while this is True, and is rejected when it is False.
 STUB_MODE: bool = True
 
 # ---------------------------------------------------------------------------
@@ -523,10 +527,21 @@ def run_workflow(conn: sqlite3.Connection, change_id: str) -> None:
       3. POST /approve legacy_removal → endpoint advances to DONE; no agent
                                         work needed.
     """
+    # Routing: a change carrying a structured spec runs the real agents; a
+    # legacy description-only change runs the stubs below.  No existing client
+    # or test sends a spec, so they all keep the stub path unchanged.
+    spec_row = ledger.get_change_spec(conn, change_id)
+    if spec_row is not None:
+        from orchestrator.real_workflow import run_real_workflow
+
+        run_real_workflow(conn, change_id, spec_row)
+        return
+
     if not STUB_MODE:
         raise RuntimeError(
-            "run_workflow() called with STUB_MODE=False but no real agents are "
-            "registered. Wire in real agents before disabling stub mode."
+            "run_workflow() called with STUB_MODE=False and the change carries "
+            "no spec, so there is nothing to run. Supply a ChangeSpec to use "
+            "the real agents."
         )
 
     current = sm.get_state(conn, change_id)

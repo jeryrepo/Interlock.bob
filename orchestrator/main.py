@@ -22,11 +22,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 
 import orchestrator.ledger as ledger
 import orchestrator.state_machine as sm
 from orchestrator.agent_runner import run_workflow
+from orchestrator.schemas import ChangeSpec
 from orchestrator.gate import build_graph, evaluate_gate
 
 # ---------------------------------------------------------------------------
@@ -103,6 +105,14 @@ class ApprovalResponse(BaseModel):
 
 class CreateChangeRequest(BaseModel):
     description: str
+    spec: ChangeSpec | None = None
+    """
+    Optional structured change spec.  Additive: existing clients that send only
+    a description keep working exactly as before (AGENTS.md invariant 7).
+
+    When present the orchestrator runs the real agents for that change kind;
+    when absent it runs the stub workflow.
+    """
 
 
 class ApproveRequest(BaseModel):
@@ -131,6 +141,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# The frontend is a separate origin (Streamlit on :8501, and any future browser
+# client), so the API must permit cross-origin reads.  Every endpoint is
+# read-only or human-gated and there is no auth or cookie to protect, which is
+# what makes a permissive policy acceptable here; revisit if auth is added.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 
 def _get_conn():
     return app.state.conn
@@ -151,6 +174,10 @@ def create_change_request(body: CreateChangeRequest):
     conn = _get_conn()
     change_id = str(uuid.uuid4())
     ledger.create_change(conn, change_id, body.description)
+    if body.spec is not None:
+        ledger.set_change_spec(
+            conn, change_id, body.spec.kind, body.spec.model_dump()
+        )
     run_workflow(conn, change_id)
     row = ledger.get_change(conn, change_id)
     return ChangeResponse(**row)
@@ -373,4 +400,30 @@ def get_approvals(change_id: str):
     return ApprovalListResponse(
         change_id=change_id,
         approvals=[ApprovalItem(**r) for r in rows],
+    )
+
+
+class ChangeSpecResponse(BaseModel):
+    change_id: str
+    kind: str | None
+    spec: dict | None
+
+
+@app.get("/change-requests/{change_id}/spec", response_model=ChangeSpecResponse)
+def get_change_spec(change_id: str):
+    """
+    Read-only projection of the structured change spec.
+
+    Additive endpoint (invariant 7): ChangeResponse is unchanged, so existing
+    clients are unaffected.  `kind` and `spec` are null for a legacy
+    description-only change, which is how a client can tell the two apart.
+    """
+    conn = _get_conn()
+    if ledger.get_change(conn, change_id) is None:
+        raise HTTPException(status_code=404, detail="change_request not found")
+    row = ledger.get_change_spec(conn, change_id)
+    if row is None:
+        return ChangeSpecResponse(change_id=change_id, kind=None, spec=None)
+    return ChangeSpecResponse(
+        change_id=change_id, kind=row["kind"], spec=row["spec"]
     )
