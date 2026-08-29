@@ -23,6 +23,3 @@ paths:
                   customer_id:
                     type: string
                     description: 'Legacy customer identifier'
-                  account_id:
-                    type: string
-                    description: 'account_id (replaces customer_id)'
