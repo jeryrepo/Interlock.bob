@@ -91,17 +91,32 @@ Agents need a stable internal representation of their inputs and outputs without
 
 ## Sub-Task 2 — Implement `compatibility-strategy`
 
-**Status**: [x] done — commit `0d745d7` on `feature/planning`
+**Status**: [x] done — audited and corrected; latest commit `9e570e1` on `feature/planning`
+
+### Completion notes
+- Initial implementation commit: `0d745d7`
+- Post-audit fix commit: `9e570e1` (canonical edge-direction correction)
+
+**Bug found and fixed during audit:**
+The initial implementation used `nx.ancestors(g, provider)` to find consumers. This was logically wrong under the canonical contract edge direction and was masked by test fixtures that also encoded edges in the wrong direction. After the audit:
+- Canonical direction confirmed: `from_component = provider`, `to_component = consumer` (e.g. `account-service -> checkout`).
+- Consumer traversal corrected to `nx.descendants(g, provider)`.
+- `db_edge_sources` tracking corrected to `to_component` (the consumer end).
+- Consumer ordering reversal removed (topological sort already correct with canonical edges).
+- Evidence dep_lookup key corrected from `(consumer, provider)` to `(provider, consumer)`.
+- All conftest fixtures corrected to canonical direction.
+- `TestCanonicalEdgeDirection` regression class added (8 tests) with the canonical graph:
+  `account-service -> service-alpha`, `account-service -> service-beta`, `service-beta -> service-gamma`.
 
 ### Intent
 `compatibility-strategy` receives a change request and discovery evidence (dependencies + Evidence objects) encoded as a plain dict and produces a structured migration plan as a plain dict. It derives the migration order by building a NetworkX directed graph from the dependency list — it must never hardcode consumer names.
 
 ### Expected Outcomes
 - `agents/planning/compatibility_strategy.py` has a fully implemented `run(data: dict) -> dict` function.
-- The function builds a NetworkX directed graph from `data["dependencies"]`.
-- It identifies all components that directly or transitively depend on the provider.
+- The function builds a NetworkX directed graph from `data["dependencies"]` using canonical edge direction (provider → consumer).
+- It identifies all components that directly or transitively receive from the provider via `nx.descendants`.
 - It produces a topologically sorted `migration_steps` list: provider first, then each consumer in dependency order.
-- If a `db` edge to the provider exists, that component is placed last (platform-config pattern).
+- If a `db` edge to the provider exists, that consumer is placed last (platform-config pattern).
 - `compatibility_requirements` is derived: dual-field coexistence (provider must expose both old and new field names during the window).
 - `verification_requirements` is derived: each affected consumer must be covered by a `test_result` evidence item before legacy field removal.
 - `affected_consumers` lists all non-provider components in the migration steps.
@@ -110,18 +125,18 @@ Agents need a stable internal representation of their inputs and outputs without
 - No side effects; no file I/O; no subprocess calls; no SQLite.
 
 ### Todo List
-1. Import `networkx`, `typing.TypedDict`, stdlib modules.
-2. Read `data["change_request"]` to obtain `provider` name, `old_field`, `new_field`.
-3. Build `DiGraph` from `data["dependencies"]`: edge from `from_component` to `to_component`.
-4. Verify provider node exists in graph; raise `ValueError` if absent.
-5. Use `networkx.ancestors` to find all components that reach the provider (i.e., depend on it).
-6. Detect cycles with `networkx.is_directed_acyclic_graph`; raise `ValueError` if cyclic.
-7. Topologically sort consumers; move any `db`-edge consumer to the end.
-8. Build `migration_steps` list: first step is the provider patch, then each consumer.
-9. Build `compatibility_requirements` from old/new field names.
-10. Build `verification_requirements`: one entry per consumer step.
-11. Build `evidence` list, one entry per consumer, `claim_type="dependency"`, `confidence="confirmed"`.
-12. Return assembled result dict.
+1. Import `networkx`, `typing.TypedDict`, stdlib modules. ✓
+2. Read `data["change_request"]` to obtain `provider` name, `old_field`, `new_field`. ✓
+3. Build `DiGraph` from `data["dependencies"]`: canonical edge `from_component -> to_component`. ✓
+4. Verify provider node exists in graph; raise `ValueError` if absent. ✓
+5. Use `nx.descendants(g, provider)` to find all downstream consumers. ✓
+6. Detect cycles with `networkx.is_directed_acyclic_graph`; raise `ValueError` if cyclic. ✓
+7. Topologically sort consumers; move any `db`-edge consumer (to_component) to the end. ✓
+8. Build `migration_steps` list: first step is the provider patch, then each consumer. ✓
+9. Build `compatibility_requirements` from old/new field names. ✓
+10. Build `verification_requirements`: one entry per consumer step. ✓
+11. Build `evidence` list, one entry per consumer, `claim_type="dependency"`, `confidence="confirmed"`. ✓
+12. Return assembled result dict. ✓
 
 ### Relevant Context
 - `requirements.txt` includes `networkx`.
@@ -210,7 +225,7 @@ Agents need a stable internal representation of their inputs and outputs without
 
 ## Sub-Task 5 — Write `tests/planning/` Suite
 
-**Status**: [x] done — 26/26 tests pass; commit `0d745d7`
+**Status**: [x] done — 34/34 tests pass after audit; latest commit `9e570e1`
 
 ### Intent
 Prove that `compatibility-strategy` is correct: derives the plan from the dependency graph, produces a valid topological order, handles edge cases cleanly.
@@ -343,18 +358,19 @@ Each agent file will contain a block like:
 ```
 
 ## Definition of Done Checklist
-- [ ] `compatibility-strategy` derives plan from graph, not hardcoded names
-- [ ] `provider-patch` reads before patching, runs real pytest, produces real SHA
-- [ ] `consumer-migration` migrates each consumer independently, real commits, real SHAs
+- [x] `compatibility-strategy` derives plan from graph, not hardcoded names — confirmed by `TestNoHardcoding` + `TestCanonicalEdgeDirection`; commit `9e570e1`
+- [x] Canonical edge direction (`from_component = provider`, `to_component = consumer`) used throughout; `nx.descendants` used for downstream traversal — audited and corrected in commit `9e570e1`
+- [x] `tests/planning/` all pass with mock dict inputs — **34/34** passing; commit `9e570e1`
+- [ ] `provider-patch` reads before patching, runs real pytest, produces real SHA — **not started**
+- [ ] `consumer-migration` migrates each consumer independently, real commits, real SHAs — **not started**
 - [ ] Person 3 has not created or scaffolded baseline fixture repositories (Person 2 owns those); when real fixtures land, `provider-patch` modifies `fixtures/account-service/` and `consumer-migration` modifies the Checkout, Fraud, and Analytics Worker repos — through the implementation agents, with real pytest, real Git commits, and real SHAs
-- [ ] No production Pydantic schemas in `agents/planning/schemas.py` or `orchestrator/schemas/`
-- [ ] `tests/planning/` all pass with mock dict inputs
-- [ ] `tests/implementation/` all pass with temporary Git repos
-- [ ] Running tests leaves zero commits on `feature/planning`
-- [ ] No agent writes SQLite
-- [ ] No agent calls another agent
-- [ ] No faked SHAs or test output
-- [ ] PR on `feature/planning` branch ready
+- [x] No production Pydantic schemas in `agents/planning/schemas.py` or `orchestrator/schemas/`
+- [ ] `tests/implementation/` all pass with temporary Git repos — **not started**
+- [x] Running tests leaves zero commits on `feature/planning`
+- [x] No agent writes SQLite
+- [x] No agent calls another agent
+- [ ] No faked SHAs or test output — **not applicable yet** (implementation agents not started)
+- [ ] PR on `feature/planning` branch ready — **in progress**
 
 ---
 
