@@ -33,7 +33,15 @@ Core story:
 - Analytics Worker must be discovered from actual source code, never hardcoded.
 - Real fixture repositories, real tests, and real Git commits are required.
 - No silent agent failures: retry once on validation failure, then fail loudly.
-- Do not add Neo4j, Temporal, Kafka, Kubernetes, OTel, OPA, GitHub Actions, auth, or dashboards in the MVP.
+- Do not add Neo4j, Temporal, Kafka, Kubernetes, OTel, or OPA. The coexistence
+  rehearsal stays plain Docker Compose.
+
+> **Amended 2026-08-29 by [ADR-0001](../adr/0001-exit-48h-mvp-scope.md).**
+> The original rule also excluded GitHub Actions, auth, and dashboards "in the
+> MVP". Interlock has moved past the 48-hour build: packaging, a CLI, an MCP
+> server, and a PR-review GitHub Action are now in scope. The infrastructure
+> exclusions above remain hard limits, and **every Golden Rule and every
+> `AGENTS.md` invariant survives this amendment unchanged.**
 
 ## Runtime Agents — 10
 1. repo-map
