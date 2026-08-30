@@ -504,29 +504,20 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
         )
 
     # ------------------------------------------------------------------
-    # Step 7: Git commit (only if there is something to commit).
+    # Step 7: Git commit.
     # ------------------------------------------------------------------
     _run_git(["add", "."], repo_path)
-
-    # Check whether git actually has staged changes before committing.
-    status_result = subprocess.run(
-        ["git", "-C", str(repo_path), "diff", "--cached", "--quiet"],
-        capture_output=True,
+    _run_git(
+        [
+            "commit",
+            "-m",
+            f"provider-patch: add {new_field}, retain {old_field}",
+        ],
+        repo_path,
     )
-    has_staged = status_result.returncode != 0  # exit 1 means differences exist
-
-    if has_staged:
-        _run_git(
-            [
-                "commit",
-                "-m",
-                f"provider-patch: add {new_field}, retain {old_field}",
-            ],
-            repo_path,
-        )
 
     # ------------------------------------------------------------------
-    # Step 8: Retrieve the real commit SHA (HEAD, whether new or existing).
+    # Step 8: Retrieve the real commit SHA.
     # ------------------------------------------------------------------
     commit_sha = _run_git(["rev-parse", "HEAD"], repo_path)
 

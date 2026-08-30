@@ -13,12 +13,6 @@ The `analytics-worker` is intentionally excluded: its worker.py uses a
 variable named `event`, not `account_response`, and its directory contains
 no reference to account-service in its README.
 
-Canonical edge direction:
-  from_component = consumer  (the component that calls the API)
-  to_component   = provider  (account-service, which exposes the field)
-
-e.g. checkout -> account-service
-
 Returns a dict that validates as DiscoveryResult.
 Does NOT write to the database directly.
 Does NOT call other agents.

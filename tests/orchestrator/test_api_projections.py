@@ -12,13 +12,6 @@ from fastapi.testclient import TestClient
 
 import orchestrator.ledger as ledger
 from orchestrator.main import app
-import orchestrator.agent_runner as agent_runner
-
-
-@pytest.fixture(autouse=True)
-def force_stub_mode(monkeypatch):
-    """Force stub mode for all tests in this module — keeps them fast and deterministic."""
-    monkeypatch.setattr(agent_runner, "STUB_MODE", True)
 
 
 @pytest.fixture

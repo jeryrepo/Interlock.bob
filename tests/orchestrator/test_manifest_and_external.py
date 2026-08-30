@@ -166,10 +166,11 @@ class TestExternalChangeAgent:
         root = tmp_path / "svc"
         root.mkdir()
         (root / "code.py").write_text(body, encoding="utf-8")
+        # Use a cross-platform test command — "sh" is unavailable on Windows.
         (root / MANIFEST_FILENAME).write_text(
-            '[component]\ntest_command = "sh ok.sh"\n', encoding="utf-8"
+            '[component]\ntest_command = "python -c \'import sys; sys.exit(0)\'"\n',
+            encoding="utf-8",
         )
-        (root / "ok.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         for args in (["init"], ["config", "user.email", "t@e.com"],
                      ["config", "user.name", "t"], ["add", "."], ["commit", "-m", "x"]):
             subprocess.run(["git", "-C", str(root), *args], capture_output=True)

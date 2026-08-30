@@ -6,10 +6,10 @@ Deterministic safety gate for Interlock.
 evaluate_gate() is pure read-only Python — zero LLM involvement.
 The critic agent CANNOT override the result of this function.
 
-Canonical edge direction: consumer -> provider.  A dependency_edge row
-reads ``from_component = checkout``, ``to_component = account-service``.
+Canonical edge direction: provider -> consumer.  A dependency_edge row
+reads ``from_component = account-service``, ``to_component = checkout``.
 This matches what the discovery agents emit and what the planning agent
-consumes via ``nx.ancestors(provider)``.
+consumes via ``nx.descendants(provider)``.
 
 Gate logic:
   1. Find all consumers that depend on the provider via dependency_edge rows.
@@ -148,12 +148,12 @@ def get_required_consumers(conn: sqlite3.Connection, change_id: str) -> list[str
     """
     Return sorted list of component names that depend on the provider.
 
-    Canonical edge direction: consumer -> provider.
-        from_component = consumer  (the component that depends on the field)
-        to_component   = provider  (the component that exposes the field)
+    Canonical edge direction (see docs/prompts/00_SHARED_TEAM_CONTRACT.md):
+        from_component = provider   (the component that exposes the field)
+        to_component   = consumer   (the component that depends on it)
 
-    e.g. ``checkout -> account-service``.  Consumers are therefore read off
-    the ``from_component`` end of edges whose ``to_component`` is the provider.
+    e.g. ``account-service -> checkout``.  Consumers are therefore read off
+    the ``to_component`` end of edges whose ``from_component`` is the provider.
     """
     provider = _resolve_provider(conn, change_id)
     deps = ledger.get_dependencies(conn, change_id)

@@ -103,23 +103,30 @@ def _make_worktree(src: Path, dest: Path) -> None:
 
 def _prepare_account_service_worktree(src: Path, dest: Path) -> None:
     """
-    Copy account-service into dest worktree and add a post-migration test
-    that asserts account_id is present (added by provider-patch).
-    The addition is made in the worktree only, never in the real fixture.
+    Copy account-service into dest worktree and update the pre-migration
+    test that asserts 'account_id' is absent (it was written for the
+    pre-migration baseline; after provider-patch it would fail).
+    The update mirrors what a real migration workflow would do — the test
+    is fixed in the worktree, not in the real fixture.
     """
     _make_worktree(src, dest)
     test_app = dest / "tests" / "test_app.py"
     if test_app.exists():
         content = test_app.read_text(encoding="utf-8")
-        # Append a post-migration assertion so the worktree suite validates
-        # that provider-patch correctly adds account_id.
-        post_migration_test = (
-            '\n\ndef test_get_account_has_account_id_post_migration():\n'
+        # Remove the pre-migration-only test that asserts account_id is absent,
+        # since provider-patch will add account_id and that test would fail.
+        # We replace it with a post-migration assertion that both fields are present.
+        updated = content.replace(
+            'def test_get_account_no_account_id_pre_migration():\n'
+            '    """Pre-migration: account_id is NOT yet in the response."""\n'
+            '    result = get_account("cust-xyz")\n'
+            '    assert "account_id" not in result',
+            'def test_get_account_has_account_id_post_migration():\n'
             '    """Post-migration: account_id must be present in the response."""\n'
             '    result = get_account("cust-xyz")\n'
-            '    assert "account_id" in result\n'
+            '    assert "account_id" in result',
         )
-        test_app.write_text(content + post_migration_test, encoding="utf-8")
+        test_app.write_text(updated, encoding="utf-8")
         # Stage the updated test file so git is clean for patch_run
         subprocess.run(
             ["git", "-C", str(dest), "add", str(test_app)],

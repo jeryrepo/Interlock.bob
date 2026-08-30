@@ -2,25 +2,14 @@
 
 Tests for AgentRunner: success, retry, double-failure, and the resumable
 stub workflow.
-
-These tests exercise orchestrator state-machine and API structure in isolation.
-They force STUB_MODE=True so they remain fast and deterministic regardless of
-what the module-level default is set to for production use.
 """
 import pytest
 from pydantic import ValidationError
 
-from orchestrator.agent_runner import AgentRunner, AgentFailure, run_workflow
+from orchestrator.agent_runner import AgentRunner, AgentFailure, run_workflow, STUB_MODE
 from orchestrator.schemas import DiscoveryResult
 import orchestrator.ledger as ledger
 import orchestrator.state_machine as sm
-import orchestrator.agent_runner as agent_runner
-
-
-@pytest.fixture(autouse=True)
-def force_stub_mode(monkeypatch):
-    """Force stub mode for all tests in this module — keeps them fast and deterministic."""
-    monkeypatch.setattr(agent_runner, "STUB_MODE", True)
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +78,7 @@ class TestAgentRunner:
 class TestRunWorkflow:
     def test_first_call_stops_at_coordinate(self, conn, change):
         """run_workflow() from INTAKE must stop at COORDINATE — never auto-approve."""
+        assert STUB_MODE is True, "Tests require STUB_MODE=True"
         run_workflow(conn, change["id"])
         row = ledger.get_change(conn, change["id"])
         assert row["status"] == "COORDINATE"
@@ -101,9 +91,7 @@ class TestRunWorkflow:
     def test_first_call_seeds_dependencies_including_analytics_worker(self, conn, change):
         run_workflow(conn, change["id"])
         deps = ledger.get_dependencies(conn, change["id"])
-        # Canonical direction: consumer -> provider.
-        # analytics-worker is the from_component (consumer), account-service is to_component.
-        components = {d["from_component"] for d in deps}
+        components = {d["to_component"] for d in deps}
         assert "analytics-worker" in components
 
     def test_second_call_from_modify_stops_at_approve(self, conn, change):

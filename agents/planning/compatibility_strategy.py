@@ -110,15 +110,15 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
     # ------------------------------------------------------------------
     # Build directed graph
-    # Canonical contract: consumer -> provider
-    #   from_component = consumer  (the node that depends on the field)
-    #   to_component   = provider  (the node that exposes the field)
+    # Canonical contract (00_SHARED_TEAM_CONTRACT.md):
+    #   from_component = provider  (the node that exposes the field)
+    #   to_component   = consumer  (the node that depends on the field)
     # So g.add_edge(from_component, to_component) produces edges that
-    # flow FROM consumers TOWARD the provider:
-    #   checkout         -> account-service
-    #   fraud            -> account-service
-    #   analytics-worker -> account-service
-    # Upstream consumers are therefore reachable via nx.ancestors.
+    # flow FROM the provider TOWARD consumers:
+    #   account-service -> checkout
+    #   account-service -> fraud
+    #   account-service -> analytics-worker
+    # Downstream consumers are therefore reachable via nx.descendants.
     # ------------------------------------------------------------------
     g: nx.DiGraph = nx.DiGraph()
     db_edge_sources: set[str] = set()
@@ -128,7 +128,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
         dst = dep["to_component"]
         g.add_edge(src, dst)
         if dep.get("edge_type") == "db":
-            db_edge_sources.add(src)   # consumer (from_component) is the db-edge dependent
+            db_edge_sources.add(dst)   # consumer (to_component) is the db-edge dependent
 
     # ------------------------------------------------------------------
     # Validate: provider must appear as a node
@@ -150,11 +150,11 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
         )
 
     # ------------------------------------------------------------------
-    # Find all consumers: nodes that can REACH the provider via directed edges.
-    # With canonical edges (consumer -> provider), nx.ancestors(g, provider)
-    # returns every component that directly or transitively depends on it.
+    # Find all consumers: nodes reachable FROM the provider via directed edges.
+    # With canonical edges (provider -> consumer), nx.descendants(g, provider)
+    # returns every component that directly or transitively receives from it.
     # ------------------------------------------------------------------
-    consumers: set[str] = nx.ancestors(g, provider)
+    consumers: set[str] = nx.descendants(g, provider)
 
     if not consumers:
         # Provider exists but nothing depends on it — plan is trivially provider-only.
@@ -162,14 +162,14 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
     # ------------------------------------------------------------------
     # Sort consumers topologically.
-    # With canonical edges (consumer -> ... -> provider), we need consumers
-    # to be migrated in dependency order: a consumer that another consumer
-    # depends on (transitively toward the provider) must come first.
-    # nx.topological_sort on the consumer-to-provider graph puts the most
-    # upstream consumers (closest to the provider) LAST.  We reverse this
-    # to get "direct consumers before their own dependents" ordering.
+    # With canonical edges (provider -> consumer -> transitive-consumer),
+    # nx.topological_sort produces a sequence where the provider comes first
+    # and downstream consumers follow in dependency order — so direct consumers
+    # of the provider appear before their own dependents.
+    # We filter to just the consumer set; their relative order is already
+    # correct (direct consumers before transitive ones).
     # ------------------------------------------------------------------
-    full_topo = list(nx.topological_sort(g))  # most-upstream consumers last
+    full_topo = list(nx.topological_sort(g))  # provider first, consumers downstream
     consumer_order = [n for n in full_topo if n in consumers]
 
     # Move db-edge sources to the end (platform-config pattern)
@@ -243,19 +243,19 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     # ------------------------------------------------------------------
     # Evidence — one entry per consumer, citing the dependency source
     # ------------------------------------------------------------------
-    # Canonical edge direction: consumer is from_component, provider is to_component.
+    # Canonical edge direction: provider is from_component, consumer is to_component.
     dep_lookup: dict[tuple[str, str], dict] = {
         (d["from_component"], d["to_component"]): d for d in deps
     }
     result_evidence: list[_Evidence] = []
     for consumer in consumer_order:
-        # Prefer the direct edge from consumer to provider; fall back to any
-        # edge whose from_component is this consumer (covers transitive cases).
-        direct_key = (consumer, provider)
+        # Prefer the direct edge from provider; fall back to any edge whose
+        # to_component is this consumer (covers transitive cases).
+        direct_key = (provider, consumer)
         dep_for_consumer = dep_lookup.get(direct_key)
         if dep_for_consumer is None:
             dep_for_consumer = next(
-                (d for d in deps if d["from_component"] == consumer), None
+                (d for d in deps if d["to_component"] == consumer), None
             )
         source_ref = (
             dep_for_consumer.get("reason") or f"dependency:{provider}->{consumer}"

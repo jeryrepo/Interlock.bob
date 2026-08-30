@@ -3,10 +3,6 @@
 FastAPI endpoint tests using TestClient.
 All tests use an in-memory SQLite database via app.state override.
 
-These tests exercise API and state-machine structure in isolation.
-They force STUB_MODE=True so they remain fast and deterministic regardless of
-what the module-level default is set to for production use.
-
 Gate flow under test:
   POST /change-requests → status=COORDINATE
   POST /approve coordinate → status=GATE_DECISION
@@ -18,13 +14,6 @@ from fastapi.testclient import TestClient
 import orchestrator.ledger as ledger
 import orchestrator.state_machine as sm
 from orchestrator.main import app
-import orchestrator.agent_runner as agent_runner
-
-
-@pytest.fixture(autouse=True)
-def force_stub_mode(monkeypatch):
-    """Force stub mode for all tests in this module — keeps them fast and deterministic."""
-    monkeypatch.setattr(agent_runner, "STUB_MODE", True)
 
 
 @pytest.fixture

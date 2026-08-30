@@ -2,16 +2,22 @@ openapi: "3.0.0"
 info:
   title: Account Service
   version: "1.0"
+  description: >
+    Provides customer account data. PRE-MIGRATION state: responses contain
+    customer_id only. Post-migration will introduce account_id alongside
+    customer_id during the compatibility window.
 paths:
   /accounts/{id}:
     get:
       summary: Get account by customer ID
+      operationId: getAccount
       parameters:
         - name: id
           in: path
           required: true
           schema:
             type: string
+          description: The customer_id to look up
       responses:
         "200":
           description: Account data
@@ -19,10 +25,11 @@ paths:
             application/json:
               schema:
                 type: object
+                required:
+                  - customer_id
                 properties:
                   customer_id:
                     type: string
-                    description: 'Legacy customer identifier'
-                  account_id:
-                    type: string
-                    description: 'account_id (replaces customer_id)'
+                    description: >
+                      Customer identifier (pre-migration canonical field).
+                      Will be superseded by account_id after migration.

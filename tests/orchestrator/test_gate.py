@@ -15,13 +15,13 @@ from orchestrator.gate import evaluate_gate, get_required_consumers, build_graph
 
 def _seed_graph(conn, change_id, consumers):
     """
-    Add dependency edges from each consumer to account-service.
+    Add dependency edges from account-service to each consumer.
 
-    Canonical direction is consumer -> provider, so the consumer is the
-    from_component and account-service is the to_component on every edge.
+    Canonical direction is provider -> consumer, so account-service is the
+    from_component on every edge.
     """
     for consumer in consumers:
-        ledger.add_dependency(conn, change_id, consumer, "account-service", "api")
+        ledger.add_dependency(conn, change_id, "account-service", consumer, "api")
 
 
 class TestGetRequiredConsumers:
@@ -31,8 +31,7 @@ class TestGetRequiredConsumers:
         assert set(consumers) == {"checkout", "fraud"}
 
     def test_ignores_edges_not_to_provider(self, conn, change):
-        # Edge from checkout to some-other-service — to_component is not "account-service"
-        ledger.add_dependency(conn, change["id"], "checkout", "some-other-service", "api")
+        ledger.add_dependency(conn, change["id"], "some-other-service", "checkout", "api")
         consumers = get_required_consumers(conn, change["id"])
         assert consumers == []
 
@@ -93,7 +92,7 @@ class TestEvaluateGate:
         """
         _seed_graph(conn, change["id"], ["checkout", "fraud"])
         ledger.add_dependency(
-            conn, change["id"], "analytics-worker", "account-service", "undocumented"
+            conn, change["id"], "account-service", "analytics-worker", "undocumented"
         )
         # Only checkout and fraud verified, analytics-worker missing
         ledger.upsert_consumer_migration(conn, change["id"], "checkout", "verified")
@@ -120,7 +119,7 @@ class TestBuildGraph:
 
     def test_edge_has_type(self, conn, change):
         ledger.add_dependency(
-            conn, change["id"], "analytics-worker", "account-service", "undocumented", "source scan"
+            conn, change["id"], "account-service", "analytics-worker", "undocumented", "source scan"
         )
         graph = build_graph(conn, change["id"])
         edge = graph["edges"][0]

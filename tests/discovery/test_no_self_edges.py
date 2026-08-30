@@ -7,12 +7,14 @@ Cross-agent invariants for discovery dependency edges:
      A self-edge causes a cycle in the planning phase's topological sort.
 
   2. Correct direction: every edge emitted for the canonical demo change
-     (provider = "account-service") must have to_component == "account-service".
-     Canonical direction is consumer -> provider: a component DEPENDS ON the
-     provider, so the edge points from the consumer toward the provider.
-     Emitting the edge in the reverse direction (provider -> consumer) means
-     gate.py's get_required_consumers() — which filters to_component == PROVIDER
-     — will find zero consumers and always return NOT_PROVEN_SAFE.
+     (provider = "account-service") must have from_component == "account-service".
+     Canonical direction is provider -> consumer, as defined in
+     docs/prompts/00_SHARED_TEAM_CONTRACT.md and relied on by
+     compatibility_strategy's nx.descendants(provider).
+     Emitting the edge in the reverse direction (consumer -> provider) means
+     gate.py's get_required_consumers() — which collects to_component where
+     from_component == PROVIDER — will find zero consumers and always return
+     NOT_PROVEN_SAFE.
 
 Parametrized over all four real discovery agents.
 """
@@ -64,13 +66,13 @@ def test_no_self_referencing_dependency_edge(agent_name, agent_fn, base_data):
 def test_all_edges_point_consumer_to_provider(agent_name, agent_fn, base_data):
     """
     For every dependency edge emitted where one endpoint is the provider
-    (account-service), the edge must be directed consumer -> provider:
-      from_component = <consumer>
-      to_component   = "account-service"
+    (account-service), the edge must be directed provider -> consumer:
+      from_component = "account-service"
+      to_component   = <consumer>
 
-    Emitting the edge in the reverse direction (account-service -> consumer)
-    means gate.py's get_required_consumers() — which collects from_component
-    where to_component == PROVIDER — will find zero consumers and always
+    Emitting the edge in the reverse direction (consumer -> account-service)
+    means gate.py's get_required_consumers() — which collects to_component
+    where from_component == PROVIDER — will find zero consumers and always
     return NOT_PROVEN_SAFE, even after every consumer is genuinely verified.
     """
     result = agent_fn(base_data)
@@ -84,7 +86,7 @@ def test_all_edges_point_consumer_to_provider(agent_name, agent_fn, base_data):
 
     reversed_edges = [
         dep for dep in provider_edges
-        if dep["from_component"] == _PROVIDER  # provider on the wrong (source) end
+        if dep["to_component"] == _PROVIDER  # provider on the wrong (target) end
     ]
 
     assert not reversed_edges, (

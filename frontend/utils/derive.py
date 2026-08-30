@@ -106,12 +106,8 @@ def build_activity_feed(evidence: list[dict]) -> list[dict]:
         subject = row.get("subject", "?")
         phase = _phase_for(row)
 
-        is_skipped = isinstance(content, dict) and content.get("skipped") is True
-        if confidence == "hypothesis" and not is_skipped:
+        if confidence == "hypothesis":
             outcome = "hidden dependency discovered"
-            level = "alert"
-        elif confidence == "hypothesis" and is_skipped:
-            outcome = "skipped (not proven)"
             level = "alert"
         elif confidence == "refuted":
             outcome = "refuted"

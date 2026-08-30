@@ -7,12 +7,6 @@ Walks every repository under fixtures_root and produces a structured
 inventory of components, source files, OpenAPI specs, schema/migration
 files, and field references.
 
-Canonical edge direction:
-  from_component = consumer  (the component that references the field)
-  to_component   = provider  (the component that owns/exposes the field)
-
-e.g. checkout -> account-service  (checkout depends on account-service)
-
 Returns a dict that validates as DiscoveryResult.
 Does NOT write to the database directly.
 Does NOT call other agents.

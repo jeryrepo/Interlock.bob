@@ -374,34 +374,11 @@ def _migrate_test_file(
     new_field: str,
 ) -> tuple[str, bool]:
     """
-    Migrate test file: replace old_field references with new_field.
-
-    One class of line is intentionally left untouched: negative proof-of-removal
-    assertions of the form  ``assert "old_field" not in ...``.  These lines are
-    the *evidence* that the old field has been removed; replacing old_field there
-    would produce a logically contradictory test (asserting both presence and
-    absence of the same key).
-
-    All other old_field references are replaced as in source files.
+    Migrate test file: replace all old_field references with new_field.
+    Same replacement as source files but applied to test files.
     Returns (new_content, was_changed).
     """
-    # Pattern: assert "<old_field>" not in  (proof-of-removal sentinel — keep as-is)
-    _sentinel_re = re.compile(
-        r"""assert\s+['"]\s*""" + re.escape(old_field) + r"""\s*['"]\s+not\s+in"""
-    )
-
-    original_lines = content.splitlines(keepends=True)
-    result_lines: list[str] = []
-    for line in original_lines:
-        if _sentinel_re.search(line):
-            # This is a proof-of-removal assertion — do not touch it.
-            result_lines.append(line)
-        else:
-            migrated, _ = _migrate_python_source(line, old_field, new_field)
-            result_lines.append(migrated)
-
-    new_content = "".join(result_lines)
-    return new_content, new_content != content
+    return _migrate_python_source(content, old_field, new_field)
 
 
 def _ensure_test_file(
@@ -623,23 +600,14 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
     # Step 7: Git commit.
     # ------------------------------------------------------------------
     _run_git(["add", "."], repo_path)
-
-    # Check whether git actually has staged changes before committing.
-    status_result = subprocess.run(
-        ["git", "-C", str(repo_path), "diff", "--cached", "--quiet"],
-        capture_output=True,
+    _run_git(
+        [
+            "commit",
+            "-m",
+            f"consumer-migration({consumer}): migrate to {new_field}",
+        ],
+        repo_path,
     )
-    has_staged = status_result.returncode != 0  # exit 1 means differences exist
-
-    if has_staged:
-        _run_git(
-            [
-                "commit",
-                "-m",
-                f"consumer-migration({consumer}): migrate to {new_field}",
-            ],
-            repo_path,
-        )
 
     # ------------------------------------------------------------------
     # Step 8: Retrieve the real commit SHA.
