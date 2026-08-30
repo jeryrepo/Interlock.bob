@@ -82,6 +82,26 @@ Full narrative in [docs/demo_script.md](docs/demo_script.md).
 
 ---
 
+## IBM technology
+
+IBM Bob was used as the coding and agent-development environment for Interlock.
+The repository preserves the role prompts, shared contracts, integration guide,
+and execution checklist under [`docs/prompts/`](docs/prompts/) so the IBM Bob
+workflow is reviewable rather than an unsupported claim.
+
+IBM Bob was applied across five workstreams: orchestration, dependency
+discovery, compatibility planning and implementation, verification, and the
+Streamlit experience. Each workstream returns structured evidence to the
+orchestrator. The final safety verdict intentionally remains deterministic
+Python; an AI-generated claim cannot override it.
+
+IBM Cloud Code Engine deployment assets are maintained on the
+[`feature/ibm-cloud-deploy`](https://github.com/jeryrepo/Interlock.bob/tree/feature/ibm-cloud-deploy)
+branch. This README does not claim a live IBM Cloud deployment unless a verified
+deployment URL and run evidence are provided with the submission.
+
+---
+
 ## How the pieces connect
 
 ```
@@ -131,36 +151,38 @@ To run the backend against a scratch database:
 $env:INTERLOCK_DB_PATH="scratch/demo.db"; uvicorn orchestrator.main:app --reload
 ```
 
-> `.env.example` currently lists `ORCHESTRATOR_DB_PATH`, but the code reads
-> `INTERLOCK_DB_PATH` (`orchestrator/main.py`). Trust the table above.
+`.env.example` uses the same `INTERLOCK_DB_PATH` name as the backend.
 
 ---
 
 ## Tests
 
-Fast, hermetic suites — no running backend required, and they do not touch
-`interlock.db`:
+The root configuration collects only the product suite under `tests/`. Fixture
+repositories are independent test targets and are intentionally run separately.
 
-```bash
-python -m pytest tests/frontend tests/orchestrator -q
-```
-
-Full suite (~2 minutes):
+Product suite:
 
 ```bash
 python -m pytest -q
 ```
 
-**Known issue:** four tests in `tests/implementation/test_consumer_migration.py`
-fail in a full-suite run but pass when that file runs alone — a test-ordering
-problem in that module, not a product bug:
+Standalone fixture suites:
 
 ```bash
-python -m pytest tests/implementation/test_consumer_migration.py -q
+python -m pytest fixtures/account-service -q
+python -m pytest fixtures/analytics-worker -q
+python -m pytest fixtures/checkout -q
+python -m pytest fixtures/fraud -q
+python -m pytest fixtures/platform-config -q
 ```
 
-`pytest.ini` sets `--basetemp=.pytest_tmp` to avoid Windows temp-permission
-errors; that directory is gitignored.
+Every command must exit successfully. A failure is not waived because the same
+test passes in isolation, and a skipped Docker rehearsal is not equivalent to a
+successful coexistence proof.
+
+`pytest.ini` sets `testpaths=tests`, excludes standalone fixtures from root
+collection, and uses `--basetemp=.pytest_tmp` to avoid Windows temporary-folder
+permission errors. Both `.pytest_tmp/` and `interlock.db` are gitignored.
 
 ---
 
