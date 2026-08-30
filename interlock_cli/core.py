@@ -880,3 +880,68 @@ def manifest_plan(components_root: str, write: bool = False) -> dict[str, Any]:
         "written": written,
         "wrote_anything": bool(written),
     }
+
+
+# Severity ordering for presentation. Nothing decides anything on it.
+SECURITY_SEVERITIES = ("high", "medium", "low")
+
+
+def security_scan(
+    components_root: str,
+    old_symbol: str = "",
+    new_symbol: str = "",
+) -> dict[str, Any]:
+    """
+    Run the security agent directly against a tree, outside any change.
+
+    Read-only, like `discover`: no workspace copy, no git, no ledger. Useful
+    before opening a PR, and the only way to scan a repository that has no
+    Interlock change recorded against it.
+    """
+    from agents.verification import security_review
+
+    result = security_review.run({
+        "change_id": "security-scan",
+        "old_field": old_symbol,
+        "new_field": new_symbol,
+        "components_root": str(Path(components_root).resolve()),
+    })
+    findings = [
+        item["content"] for item in result["evidence"]
+        if item["content"].get("rule") != "no_findings"
+    ]
+    return {
+        "components_root": str(Path(components_root).resolve()),
+        "findings": findings,
+        "counts": _severity_counts(findings),
+        "clean": not findings,
+    }
+
+
+def security_findings(conn: sqlite3.Connection, change_id: str) -> dict[str, Any]:
+    """
+    The security findings recorded during a change, read back from the ledger.
+
+    Separate from `security_scan` because these are what the agent saw *during*
+    that change, at the commits it recorded - not what the tree looks like now.
+    """
+    findings = [
+        dict(item.get("content") or {})
+        for item in ledger.get_evidence(conn, change_id)
+        if str(item.get("subject", "")).startswith("security:")
+        and (item.get("content") or {}).get("rule") != "no_findings"
+    ]
+    return {
+        "change_id": change_id,
+        "findings": findings,
+        "counts": _severity_counts(findings),
+        "clean": not findings,
+    }
+
+
+def _severity_counts(findings: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {severity: 0 for severity in SECURITY_SEVERITIES}
+    for finding in findings:
+        severity = finding.get("severity", "low")
+        counts[severity] = counts.get(severity, 0) + 1
+    return counts

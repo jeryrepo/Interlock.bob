@@ -350,6 +350,32 @@ def interlock_narrate(change_id: str, db_path: str = _DEFAULT_DB) -> str:
 
 
 @mcp.tool()
+def interlock_security(
+    components_root: str = _DEFAULT_ROOT,
+    old_symbol: str = "",
+    new_symbol: str = "",
+) -> str:
+    """
+    Report security findings in the component tree. Reads only; changes nothing.
+
+    Checks for committed secrets and credentials, the changed symbol flowing
+    into logging or authorisation code, disabled TLS verification, plaintext
+    endpoints and committed credential files. With IBM credentials configured
+    it also asks watsonx.ai for issues patterns cannot express - additively:
+    the model can propose a finding, it can never clear one.
+
+    IMPORTANT when reporting this to a user: an empty result means these checks
+    did not fire. It is NOT a statement that the code is secure, and must not be
+    presented as one. Say "no findings from these checks".
+
+    Findings are advisory. They are recorded as evidence and appear in the PR
+    review, but they never change the gate's verdict - only `interlock check
+    --fail-on-security` treats them as blocking.
+    """
+    return _render(core.security_scan(components_root, old_symbol, new_symbol))
+
+
+@mcp.tool()
 def interlock_review(change_id: str, db_path: str = _DEFAULT_DB) -> str:
     """
     Render a pull-request review for a change, as markdown.
@@ -367,7 +393,8 @@ def interlock_review(change_id: str, db_path: str = _DEFAULT_DB) -> str:
         status = core.status(conn, change_id)
         graph = core.graph(conn, change_id)
         risks = [e for e in core.evidence(conn, change_id) if e["claim_type"] == "risk"]
-    return review_mod.render_markdown(status, graph, risks)
+        security = core.security_findings(conn, change_id)
+    return review_mod.render_markdown(status, graph, risks, security=security)
 
 
 @mcp.tool()

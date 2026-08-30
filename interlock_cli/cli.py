@@ -426,6 +426,84 @@ def manifest(
     typer.echo("")
 
 
+def _print_security(payload: dict, verbose: bool = False) -> None:
+    """Render findings, worst first. Never claims the code is secure."""
+    findings = payload["findings"]
+    counts = payload["counts"]
+
+    if not findings:
+        typer.secho("\n  no findings", fg=typer.colors.GREEN, bold=True)
+        typer.echo(
+            "  These checks did not fire. That is not the same as secure -\n"
+            "  it is the set of things this scanner knows how to look for.\n"
+        )
+        return
+
+    colour = {"high": typer.colors.RED, "medium": typer.colors.YELLOW, "low": None}
+    typer.secho(
+        f"\n  {len(findings)} finding(s): "
+        f"{counts['high']} high, {counts['medium']} medium, {counts['low']} low",
+        fg=typer.colors.RED if counts["high"] else typer.colors.YELLOW,
+        bold=True,
+    )
+    typer.echo("")
+    for finding in findings:
+        severity = finding.get("severity", "low")
+        typer.secho(f"    {severity.upper():<7}", fg=colour.get(severity), nl=False)
+        typer.echo(
+            f"{finding.get('rule', '?'):<26} "
+            f"{finding.get('file', '?')}:{finding.get('line', '?')}"
+        )
+        if verbose:
+            typer.echo(f"            {finding.get('detail', '')}")
+            if finding.get("excerpt"):
+                typer.echo(f"            {finding['excerpt']}")
+    typer.echo("")
+    if any(f.get("source") == "model" for f in findings):
+        typer.echo(
+            "  Findings prefixed `model:` come from watsonx.ai and are proposals,\n"
+            "  not pattern matches. They are additive: the model cannot clear a\n"
+            "  finding, only suggest one.\n"
+        )
+
+
+@app.command()
+def security(
+    components_root: str = _ROOT,
+    old: Optional[str] = typer.Option(None, "--old", help="Symbol being changed, for PII and auth checks."),
+    new: Optional[str] = typer.Option(None, "--new", help="Its replacement."),
+    verbose: bool = typer.Option(False, "--verbose", help="Show the detail for each finding."),
+    as_json: bool = _JSON,
+) -> None:
+    """
+    Report security findings in a component tree. Reads only; changes nothing.
+
+    Checks for committed secrets, the changed symbol flowing into logs or
+    authorisation code, disabled TLS verification, plaintext endpoints and
+    committed credential files. With IBM credentials configured it also asks
+    watsonx.ai for issues patterns cannot express - additively: the model can
+    propose a finding, never clear one.
+
+    Exits non-zero when anything is found, so it works as a pre-push hook. It
+    reports findings and, when there are none, says exactly that - it will not
+    tell you a change is secure, because no scanner can establish that.
+    """
+    try:
+        payload = core.security_scan(components_root, old or "", new or "")
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"security scan could not run: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(core.EXIT_ERROR)
+
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2, default=str))
+    else:
+        typer.echo(f"\n  {payload['components_root']}")
+        _print_security(payload, verbose)
+
+    if payload["findings"]:
+        raise typer.Exit(core.EXIT_NOT_PROVEN_SAFE)
+
+
 @app.command()
 def check(
     old: str = typer.Option(..., "--old", help="Symbol being replaced."),
@@ -441,6 +519,10 @@ def check(
         help="builtin: Interlock edits the code (Python only). "
              "external: you or another agent already did the work and Interlock "
              "verifies it (any language).",
+    ),
+    fail_on_security: bool = typer.Option(
+        False, "--fail-on-security",
+        help="Also exit non-zero when the security agent reports any finding.",
     ),
     db: str = _DB,
     as_json: bool = _JSON,
@@ -475,6 +557,23 @@ def check(
 
     if result["gate"]["result"] != "VERIFIED":
         raise typer.Exit(core.EXIT_NOT_PROVEN_SAFE)
+
+    # Checked only after the verdict, and only when asked. Security findings
+    # are advisory by design: they are recorded as evidence and rendered into
+    # the PR review either way, and the gate never sees them. This flag is how
+    # a pipeline opts into treating them as blocking without changing what
+    # VERIFIED means for everyone else.
+    if fail_on_security:
+        security = core.security_findings(conn, result["change_id"])
+        if security["findings"]:
+            if not as_json:
+                typer.secho(
+                    f"  gate is VERIFIED, but --fail-on-security is set and "
+                    f"{len(security['findings'])} finding(s) were recorded.",
+                    fg=typer.colors.RED,
+                )
+                _print_security(security)
+            raise typer.Exit(core.EXIT_NOT_PROVEN_SAFE)
 
 
 @app.command()
@@ -638,16 +737,22 @@ def review(
 
     graph = core.graph(conn, change_id)
     risks = [e for e in core.evidence(conn, change_id) if e["claim_type"] == "risk"]
+    # Read back from the ledger, not re-scanned: these are what the agent saw
+    # during the change, at the commits it recorded.
+    security_payload = core.security_findings(conn, change_id)
 
     if fmt == "summary":
         typer.echo(review_mod.render_summary(result))
     elif fmt == "json":
         typer.echo(json.dumps(
-            {"status": result, "graph": graph, "risks": risks},
+            {"status": result, "graph": graph, "risks": risks,
+             "security": security_payload},
             indent=2, default=str,
         ))
     else:
-        typer.echo(review_mod.render_markdown(result, graph, risks))
+        typer.echo(review_mod.render_markdown(
+            result, graph, risks, security=security_payload
+        ))
 
     if result["gate"]["result"] != "VERIFIED":
         raise typer.Exit(core.EXIT_NOT_PROVEN_SAFE)

@@ -225,6 +225,31 @@ def interlock_dependency_graph(change_id: str) -> str:
 
 
 @http_mcp.tool()
+def interlock_security(old_symbol: str = "", new_symbol: str = "") -> str:
+    """
+    Report security findings in the component tree. Reads only; changes nothing.
+
+    Checks for committed secrets and credentials, the changed symbol flowing
+    into logging or authorisation code, disabled TLS verification, plaintext
+    endpoints and committed credential files. With IBM credentials configured
+    it also asks watsonx.ai for issues patterns cannot express - additively:
+    the model can propose a finding, it can never clear one.
+
+    IMPORTANT when reporting this to a user: an empty result means these checks
+    did not fire. It is NOT a statement that the code is secure, and must not be
+    presented as one. Say "no findings from these checks".
+
+    Findings are advisory. They are recorded as evidence and appear in the PR
+    review, but they never change the gate's verdict - only `interlock check
+    --fail-on-security` treats them as blocking.
+    """
+    settings = _settings()
+    return _render(
+        core.security_scan(settings.components_root, old_symbol, new_symbol)
+    )
+
+
+@http_mcp.tool()
 def interlock_list_changes() -> str:
     """List the changes recorded in this Interlock instance, newest first."""
     settings = _settings()

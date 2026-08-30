@@ -104,7 +104,7 @@ class TestMount:
         assert names == {
             "interlock_check", "interlock_discover", "interlock_gate",
             "interlock_evidence", "interlock_dependency_graph",
-            "interlock_list_changes",
+            "interlock_security", "interlock_list_changes",
         }
 
     def test_every_tool_documents_itself(self, client):

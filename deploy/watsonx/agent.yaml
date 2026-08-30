@@ -49,6 +49,10 @@ toolkits:
   - interlock
 
 tools:
+  # Read-only reconnaissance. Cheapest and most often what the user actually
+  # wants, so it is listed first for the model's benefit.
+  - interlock_discover
+  - interlock_security
   - interlock_check
   - interlock_gate
   - interlock_evidence

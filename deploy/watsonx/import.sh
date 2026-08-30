@@ -60,7 +60,7 @@ orchestrate toolkits add --kind mcp --name interlock \
   --description "Deterministic change-safety gate for breaking cross-service changes" \
   --url "${INTERLOCK_TUNNEL_URL%/}/mcp" \
   --transport streamable_http \
-  --tools "interlock_check,interlock_gate,interlock_evidence,interlock_dependency_graph,interlock_list_changes" \
+  --tools "interlock_discover,interlock_security,interlock_check,interlock_gate,interlock_evidence,interlock_dependency_graph,interlock_list_changes" \
   --app-id interlock_conn
 
 echo "==> agent"

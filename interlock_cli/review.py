@@ -51,6 +51,7 @@ def render_markdown(
     graph: dict[str, Any] | None = None,
     risks: list[dict[str, Any]] | None = None,
     narration: str | None = None,
+    security: dict[str, Any] | None = None,
 ) -> str:
     """
     Render a PR comment for one change.
@@ -115,6 +116,33 @@ def render_markdown(
             detail = str(content.get("detail", "")).strip()
             lines.append(f"- **{name}** ({risk.get('subject', '?')}) — {detail[:200]}")
         lines.append("")
+
+    if security and security.get("findings"):
+        counts = security.get("counts", {})
+        lines.append("### Security findings")
+        lines.append("")
+        lines.append(
+            f"**{len(security['findings'])}** — "
+            f"{counts.get('high', 0)} high, {counts.get('medium', 0)} medium, "
+            f"{counts.get('low', 0)} low. These are advisory: the verdict above "
+            f"does not depend on them."
+        )
+        lines.append("")
+        lines.append("| Severity | Finding | Location |")
+        lines.append("| --- | --- | --- |")
+        for finding in security["findings"]:
+            lines.append(
+                f"| {finding.get('severity', '?')} | `{finding.get('rule', '?')}` | "
+                f"`{finding.get('file', '?')}:{finding.get('line', '?')}` |"
+            )
+        lines.append("")
+        if any(f.get("source") == "model" for f in security["findings"]):
+            lines.append(
+                "<sub>Rules prefixed `model:` are proposals from watsonx.ai, not "
+                "pattern matches. The model can suggest a finding; it cannot "
+                "clear one.</sub>"
+            )
+            lines.append("")
 
     if narration:
         # Below the verdict and clearly labelled. The verdict above is emitted

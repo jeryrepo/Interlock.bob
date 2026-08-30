@@ -147,6 +147,14 @@ WEBHOOK_QUIET = AgentSpec(
     VerificationResult, ad.verification,
     per_component=True, step_kind="webhook_quiet",
 )
+# Advisory, like CRITIC: per_component=False, so the VERIFY phase writes its
+# evidence and never a work item. Security findings are reported, ranked and
+# rendered into the PR review; they cannot move the gate. CI opts into blocking
+# with `interlock check --fail-on-security`.
+SECURITY_REVIEW = AgentSpec(
+    "security-review", "agents.verification.security_review",
+    VerificationResult, ad.verification,
+)
 CRITIC = AgentSpec(
     "critic", "agents.verification.critic",
     VerificationResult, ad.verification,
@@ -164,7 +172,7 @@ AGENT_REGISTRY: dict[tuple[str, str], tuple[AgentSpec, ...]] = {
     ("field_rename", "PLANNING"): (COMPATIBILITY_STRATEGY,),
     ("field_rename", "MODIFY"): (PROVIDER_PATCH, CONSUMER_MIGRATION),
     ("field_rename", "REHEARSE"): (COEXISTENCE_REHEARSAL,),
-    ("field_rename", "VERIFY"): (CONTRACT_TEST, CRITIC),
+    ("field_rename", "VERIFY"): (CONTRACT_TEST, CRITIC, SECURITY_REVIEW),
 
     # --- API contract change ------------------------------------------------
     # No db-schema discovery: an API contract change does not live in SQL.
@@ -172,7 +180,7 @@ AGENT_REGISTRY: dict[tuple[str, str], tuple[AgentSpec, ...]] = {
     ("api_contract_change", "PLANNING"): (COMPATIBILITY_STRATEGY,),
     ("api_contract_change", "MODIFY"): (PROVIDER_PATCH, CONSUMER_MIGRATION),
     ("api_contract_change", "REHEARSE"): (COEXISTENCE_REHEARSAL,),
-    ("api_contract_change", "VERIFY"): (CONTRACT_TEST, CRITIC),
+    ("api_contract_change", "VERIFY"): (CONTRACT_TEST, CRITIC, SECURITY_REVIEW),
 
     # --- webhook -> pub/sub -------------------------------------------------
     # Event discovery only; the consumers are subscribers, not API callers.
@@ -182,7 +190,7 @@ AGENT_REGISTRY: dict[tuple[str, str], tuple[AgentSpec, ...]] = {
     ("transport_migration", "REHEARSE"): (COEXISTENCE_REHEARSAL,),
     # Two proofs per subscriber: its own suite still passes after the switch,
     # and it has actually drained off the retired webhook.
-    ("transport_migration", "VERIFY"): (CONTRACT_TEST_SUBSCRIBE, WEBHOOK_QUIET, CRITIC),
+    ("transport_migration", "VERIFY"): (CONTRACT_TEST_SUBSCRIBE, WEBHOOK_QUIET, CRITIC, SECURITY_REVIEW),
 }
 
 
