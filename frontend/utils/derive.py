@@ -199,21 +199,34 @@ def contract_test_results(evidence: list[dict]) -> list[dict]:
     """
     Test-result rows that explicitly report a suite outcome.
 
-    The coexistence rehearsal is also a ``test_result`` row but reports
-    ``dual_write_passed`` rather than ``tests_passed``; it has its own line in
-    the passport, so it is excluded here to keep the counts honest.
+    The backend's current verifier records process ``returncode`` while older
+    evidence records ``tests_passed``.  The coexistence rehearsal is also a
+    ``test_result`` row, but has its own passport line and is excluded here so
+    it cannot inflate the contract-test count.
     """
     return [
         r
         for r in verification_results(evidence)
-        if "tests_passed" in (r.get("content") or {})
+        if r.get("subject") not in {"coexistence", "coexistence-rehearsal"}
+        and (
+            "tests_passed" in (r.get("content") or {})
+            or isinstance((r.get("content") or {}).get("returncode"), int)
+        )
     ]
+
+
+def evidence_result_passed(row: dict) -> bool:
+    """Project either supported backend test-result shape to a pass boolean."""
+    content = row.get("content") or {}
+    if "tests_passed" in content:
+        return content.get("tests_passed") is True
+    return content.get("returncode") == 0
 
 
 def coexistence_result(evidence: list[dict]) -> dict | None:
     """The coexistence rehearsal evidence row, if the backend produced one."""
     for row in evidence:
-        if row.get("subject") == "coexistence-rehearsal":
+        if row.get("subject") in {"coexistence", "coexistence-rehearsal"}:
             return row
     return None
 

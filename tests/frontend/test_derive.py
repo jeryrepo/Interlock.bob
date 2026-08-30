@@ -17,6 +17,7 @@ from utils.derive import (  # noqa: E402
     coexistence_result,
     contract_test_results,
     critic_assessment,
+    evidence_result_passed,
     hidden_dependencies,
     migration_progress,
     split_consumers,
@@ -169,6 +170,12 @@ def test_coexistence_and_critic_found_when_present():
     assert critic_assessment(rows)["claim_type"] == "risk"
 
 
+def test_current_coexistence_subject_is_found():
+    row = ev(subject="coexistence", claim_type="test_result",
+             content={"skipped": True, "note": "Docker unavailable"})
+    assert coexistence_result([row]) == row
+
+
 # ---------------------------------------------------------------------------
 # state rail
 # ---------------------------------------------------------------------------
@@ -209,3 +216,23 @@ def test_contract_tests_keep_failing_suites():
            content={"tests_passed": False, "suite": "contract"}),
     ]
     assert len(contract_test_results(rows)) == 1
+
+
+def test_contract_tests_support_current_returncode_shape():
+    rows = [
+        ev(claim_type="test_result", subject="checkout",
+           content={"returncode": 0, "command": "python -m pytest -q"}),
+        ev(claim_type="test_result", subject="fraud",
+           content={"returncode": 1, "command": "python -m pytest -q"}),
+    ]
+    contract = contract_test_results(rows)
+    assert [r["subject"] for r in contract] == ["checkout", "fraud"]
+    assert [evidence_result_passed(r) for r in contract] == [True, False]
+
+
+def test_current_coexistence_result_does_not_count_as_contract_test():
+    rows = [
+        ev(claim_type="test_result", subject="coexistence",
+           content={"returncode": 0, "command": "docker compose up"}),
+    ]
+    assert contract_test_results(rows) == []

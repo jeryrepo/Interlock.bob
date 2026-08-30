@@ -184,6 +184,25 @@ successful coexistence proof.
 collection, and uses `--basetemp=.pytest_tmp` to avoid Windows temporary-folder
 permission errors. Both `.pytest_tmp/` and `interlock.db` are gitignored.
 
+### Current validation snapshot
+
+This is the evidence recorded from the `judge-polish` audit on 2026-08-30. It
+is a submission-readiness record, not a waiver for incomplete proof.
+
+| Check | Recorded result | Status |
+| --- | --- | --- |
+| Product suite | 337 passed, 13 failed, 4 skipped | **NOT READY** |
+| Standalone fixture suites | 13 passed | **PASS** |
+| Backend and frontend startup | Both returned HTTP 200 | **PASS** |
+| Expected demo consumers | Only `platform-config` was discovered in the live audit | **NOT PROVEN** |
+| Hidden consumer discovery | `analytics-worker` was not discovered | **FAIL** |
+| Coexistence rehearsal | Docker was unavailable and the rehearsal was recorded as skipped | **NOT PROVEN** |
+| Unsafe-removal protection | The workflow still reached `VERIFIED` after the skipped rehearsal | **FAIL** |
+| Valid end-to-end duration | No all-proof run has been recorded | **NOT RECORDED** |
+
+The branch is not submission-ready until every non-passing row is fixed and a
+fresh end-to-end run replaces this snapshot with reproducible passing evidence.
+
 ---
 
 ## Layout

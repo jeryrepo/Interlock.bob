@@ -16,6 +16,7 @@ from utils.derive import (
     coexistence_result,
     contract_test_results,
     critic_assessment,
+    evidence_result_passed,
     migration_progress,
     split_consumers,
 )
@@ -52,10 +53,7 @@ def render_passport(
     documented, undocumented = split_consumers(graph)
     verified, total = migration_progress(gate)
     tests = contract_test_results(evidence)
-    passed = [
-        t for t in tests
-        if (t.get("content") or {}).get("tests_passed") is True
-    ]
+    passed = [t for t in tests if evidence_result_passed(t)]
     coexistence = coexistence_result(evidence)
     critic = critic_assessment(evidence)
 
@@ -85,7 +83,9 @@ def render_passport(
     # -- coexistence -------------------------------------------------------
     if coexistence:
         content = coexistence.get("content") or {}
-        ok = content.get("dual_write_passed") is True
+        ok = content.get("dual_write_passed") is True or (
+            content.get("returncode") == 0 and content.get("skipped") is not True
+        )
         colour = "var(--il-green)" if ok else "var(--il-red)"
         detail = " ".join(f"{k}={v}" for k, v in content.items())
         coexistence_html = f'<span style="color:{colour}">{html.escape(detail)}</span>'
