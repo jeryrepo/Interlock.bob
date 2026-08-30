@@ -945,3 +945,126 @@ def _severity_counts(findings: list[dict[str, Any]]) -> dict[str, int]:
         severity = finding.get("severity", "low")
         counts[severity] = counts.get(severity, 0) + 1
     return counts
+
+
+def campaign_plan(
+    components_root: str,
+    entries: list[dict[str, Any]] | None = None,
+    request: str = "",
+) -> dict[str, Any]:
+    """
+    Build and order a campaign plan, without running anything.
+
+    Either `entries` (a plan file, deterministic and reviewable) or `request`
+    (a sentence, decomposed by watsonx.ai). The model chooses what to check; it
+    has no say in what passes, because every change it proposes then runs the
+    ordinary pipeline and is judged by the same gate.
+
+    Ordering is derived from real discovered consumers, not asked of a model.
+    """
+    from orchestrator import campaign
+
+    root = str(Path(components_root).resolve())
+    source = "plan"
+
+    if entries is None:
+        entries = []
+        if request:
+            source = "model"
+            entries = _propose_entries(request, root)
+
+    planned, problems = campaign.build_plan(entries, root)
+
+    # Ordering needs to know who consumes what. Discovery is read-only and
+    # fast, so this costs a scan per provider and nothing else.
+    consumers_of: dict[str, set[str]] = {}
+    for change in planned:
+        provider = change.provider
+        if provider in consumers_of:
+            continue
+        old, _ = change.symbols
+        found = discover(root, provider, old, None, change.spec["kind"])
+        consumers_of[provider] = {c["name"] for c in found["consumers"]}
+
+    ordered, cycles = campaign.order_changes(planned, consumers_of)
+
+    return {
+        "components_root": root,
+        "source": source,
+        "changes": [
+            {
+                "name": c.name, "provider": c.provider, "kind": c.spec["kind"],
+                "old": c.symbols[0], "new": c.symbols[1],
+                "implementation": c.spec.get("implementation", "builtin"),
+                "reason": c.reason,
+                "consumers": sorted(consumers_of.get(c.provider, set())),
+            }
+            for c in ordered
+        ],
+        "order": [c.name for c in ordered],
+        "problems": problems,
+        "cycles": cycles,
+        "runnable": bool(ordered) and not problems and not cycles,
+        "_planned": ordered,
+    }
+
+
+def _propose_entries(request: str, components_root: str) -> list[dict[str, Any]]:
+    """Ask watsonx.ai to decompose a request. Empty list if unavailable."""
+    try:
+        from orchestrator import watsonx
+        from orchestrator.settings import load as load_settings
+
+        settings = load_settings()
+        if not settings.watsonx.enabled:
+            return []
+        components = [c["name"] for c in list_components(components_root)]
+        return watsonx.propose_campaign(
+            request, components, _sample_symbols(components_root), settings.watsonx
+        )
+    except Exception:  # noqa: BLE001 - planning is optional; the plan file always works
+        return []
+
+
+def _sample_symbols(components_root: str, limit: int = 60) -> list[str]:
+    """
+    Field-shaped identifiers from the tree, to ground the model in real names.
+
+    Without these it proposes plausible-sounding symbols that do not exist, and
+    every one of them then fails provider or discovery validation - wasting a
+    round trip to learn what a grep could have said.
+    """
+    import re
+
+    from agents.discovery.repo_map import component_dirs
+
+    pattern = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+){1,3})\b")
+    seen: dict[str, int] = {}
+    root = Path(components_root)
+    if not root.is_dir():
+        return []
+    for component in component_dirs(root):
+        for path in list(component.rglob("*.py"))[:40]:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")[:40_000]
+            except OSError:
+                continue
+            for match in pattern.findall(text):
+                if 6 <= len(match) <= 40:
+                    seen[match] = seen.get(match, 0) + 1
+    return [s for s, _ in sorted(seen.items(), key=lambda kv: -kv[1])[:limit]]
+
+
+def campaign_run(
+    conn: sqlite3.Connection,
+    description: str,
+    plan: dict[str, Any],
+    stop_on_failure: bool = True,
+) -> dict[str, Any]:
+    """Run a plan produced by `campaign_plan` and return the combined verdict."""
+    from orchestrator import campaign
+
+    result = campaign.run_campaign(
+        conn, description, plan["_planned"], stop_on_failure=stop_on_failure
+    )
+    return result.as_dict()

@@ -376,6 +376,46 @@ def interlock_security(
 
 
 @mcp.tool()
+def interlock_campaign(
+    request: str = "",
+    components_root: str = _DEFAULT_ROOT,
+    dry_run: bool = True,
+    db_path: str = _DEFAULT_DB,
+) -> str:
+    """
+    Plan and optionally run a MULTI-CHANGE migration as one unit.
+
+    Use this when the user describes a migration that is clearly more than one
+    rename - "move the estate off customer_id", "retire the v1 contract" - and
+    interlock_check, which handles exactly one symbol on one component, would
+    not cover it.
+
+    `request` is decomposed by watsonx.ai into candidate changes. The model only
+    chooses what gets CHECKED: each change then runs the same agents and is
+    judged by the same deterministic gate, and the campaign is VERIFIED only if
+    every change in it is. There is no partial credit.
+
+    `dry_run=True` (the default) returns the plan and runs nothing, which is
+    what you should show the user first - each change copies the component tree
+    and runs real test suites, so a campaign takes minutes per change. Call
+    again with dry_run=False once they have approved the plan.
+
+    Requires watsonx.ai credentials for `request`. Without them this returns an
+    empty plan rather than guessing, and the user can write a plan file instead.
+    """
+    plan = core.campaign_plan(components_root, None, request)
+    payload = {k: v for k, v in plan.items() if k != "_planned"}
+    if dry_run or not plan["runnable"]:
+        payload["ran"] = False
+        return _render(payload)
+
+    with _ledger(db_path) as conn:
+        payload["outcome"] = core.campaign_run(conn, request, plan)
+    payload["ran"] = True
+    return _render(payload)
+
+
+@mcp.tool()
 def interlock_review(change_id: str, db_path: str = _DEFAULT_DB) -> str:
     """
     Render a pull-request review for a change, as markdown.

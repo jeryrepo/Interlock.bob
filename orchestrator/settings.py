@@ -28,15 +28,48 @@ _ENV_FILE = ".env"
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
+def installation_root() -> Path:
+    """The directory Interlock is installed in — where its own `.env` lives."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _env_candidates(path: str | Path) -> list[Path]:
+    """
+    Where to look for `.env`, in order: the working directory, then Interlock's.
+
+    A bare relative `.env` resolves against the process working directory, and
+    for the MCP server that directory is *your* repository — `interlock init`
+    writes `"cwd": "<your-repo>"` into `.bob/mcp.json` so the tools run against
+    your services. The credentials, though, live in Interlock's own checkout,
+    which is where `.gitignore` protects them.
+
+    The result was that a correctly filled `.env` was read by the CLI and
+    ignored by Bob: narration, the security model pass, LLM consumer discovery
+    and `campaign --request` all silently off, with `interlock doctor` reporting
+    them fine because doctor runs from the other directory.
+
+    Falling back to the installation keeps the secrets in one gitignored place
+    and makes them work from anywhere. A `.env` in the working directory still
+    wins, so a per-repository override remains possible.
+    """
+    candidates = [Path(path)]
+    if not Path(path).is_absolute():
+        candidates.append(installation_root() / Path(path).name)
+    return candidates
+
+
 def load_dotenv(path: str | Path = _ENV_FILE) -> None:
     """
     Load `.env` into os.environ without overwriting anything already set.
 
     Real environment variables win over the file, which is what makes the same
     image behave correctly in a container where secrets arrive as env vars.
+
+    Searches the working directory first, then Interlock's own installation —
+    see `_env_candidates` for why the second one is load-bearing.
     """
-    file = Path(path)
-    if not file.is_file():
+    file = next((c for c in _env_candidates(path) if c.is_file()), None)
+    if file is None:
         return
     for raw in file.read_text(encoding="utf-8").splitlines():
         line = raw.strip()

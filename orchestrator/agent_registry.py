@@ -88,6 +88,17 @@ POLYGLOT_DISCOVERY = AgentSpec(
     DiscoveryResult, ad.discovery,
 )
 
+# Asks watsonx.ai for consumers the scanners could not see - dynamic attribute
+# access, string-built queries, ORM mappings, coupling stated only in prose.
+# Registered LAST in DISCOVERY so it receives the scanners' edges in its context
+# and reports only what it adds. Writes evidence; writes dependency edges only
+# when INTERLOCK_LLM_EDGES=1, because an edge is something the gate then
+# requires, and that must be a deliberate choice rather than a default.
+LLM_DISCOVERY = AgentSpec(
+    "llm-discovery", "agents.discovery.llm_discovery",
+    DiscoveryResult, ad.discovery,
+)
+
 COMPATIBILITY_STRATEGY = AgentSpec(
     "compatibility-strategy", "agents.planning.compatibility_strategy",
     PlanningResult, ad.planning,
@@ -168,7 +179,7 @@ CRITIC = AgentSpec(
 
 AGENT_REGISTRY: dict[tuple[str, str], tuple[AgentSpec, ...]] = {
     # --- field rename -------------------------------------------------------
-    ("field_rename", "DISCOVERY"): (REPO_MAP, API_DISCOVERY, EVENT_DISCOVERY, DB_DISCOVERY, POLYGLOT_DISCOVERY),
+    ("field_rename", "DISCOVERY"): (REPO_MAP, API_DISCOVERY, EVENT_DISCOVERY, DB_DISCOVERY, POLYGLOT_DISCOVERY, LLM_DISCOVERY),
     ("field_rename", "PLANNING"): (COMPATIBILITY_STRATEGY,),
     ("field_rename", "MODIFY"): (PROVIDER_PATCH, CONSUMER_MIGRATION),
     ("field_rename", "REHEARSE"): (COEXISTENCE_REHEARSAL,),
@@ -176,7 +187,7 @@ AGENT_REGISTRY: dict[tuple[str, str], tuple[AgentSpec, ...]] = {
 
     # --- API contract change ------------------------------------------------
     # No db-schema discovery: an API contract change does not live in SQL.
-    ("api_contract_change", "DISCOVERY"): (REPO_MAP, API_DISCOVERY, EVENT_DISCOVERY, POLYGLOT_DISCOVERY),
+    ("api_contract_change", "DISCOVERY"): (REPO_MAP, API_DISCOVERY, EVENT_DISCOVERY, POLYGLOT_DISCOVERY, LLM_DISCOVERY),
     ("api_contract_change", "PLANNING"): (COMPATIBILITY_STRATEGY,),
     ("api_contract_change", "MODIFY"): (PROVIDER_PATCH, CONSUMER_MIGRATION),
     ("api_contract_change", "REHEARSE"): (COEXISTENCE_REHEARSAL,),
@@ -184,7 +195,7 @@ AGENT_REGISTRY: dict[tuple[str, str], tuple[AgentSpec, ...]] = {
 
     # --- webhook -> pub/sub -------------------------------------------------
     # Event discovery only; the consumers are subscribers, not API callers.
-    ("transport_migration", "DISCOVERY"): (REPO_MAP, EVENT_DISCOVERY, POLYGLOT_DISCOVERY),
+    ("transport_migration", "DISCOVERY"): (REPO_MAP, EVENT_DISCOVERY, POLYGLOT_DISCOVERY, LLM_DISCOVERY),
     ("transport_migration", "PLANNING"): (COMPATIBILITY_STRATEGY,),
     ("transport_migration", "MODIFY"): (PROVIDER_PATCH, SUBSCRIBER_SWITCH),
     ("transport_migration", "REHEARSE"): (COEXISTENCE_REHEARSAL,),

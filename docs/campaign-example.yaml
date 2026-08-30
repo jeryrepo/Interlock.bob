@@ -1,0 +1,41 @@
+# Example campaign plan.
+#
+# A campaign is several related changes run as one unit. Interlock orders them
+# so a provider is changed before anything that consumes it, runs each through
+# the ordinary pipeline, and reports one combined verdict.
+#
+# The campaign is VERIFIED only when every change in it is. There is no partial
+# credit: the changes are related, so one unproven change means nobody verified
+# the state the estate would end up in.
+#
+#   interlock campaign --plan docs/campaign-example.yaml --components-root fixtures --dry-run
+#   interlock campaign --plan docs/campaign-example.yaml --components-root fixtures
+#
+# This route needs no credentials. `--request "..."` instead of `--plan` asks
+# watsonx.ai to decompose a sentence into these entries; the model chooses what
+# gets checked and has no say in what passes.
+
+changes:
+  - name: rename-column
+    kind: field_rename
+    provider: account-service
+    old: customer_id
+    new: account_id
+    reason: The database column every other service reads.
+
+  - name: publish-new-contract
+    kind: api_contract_change
+    provider: account-service
+    old: customer_id
+    new: account_id
+    reason: The published API field has to move with the column.
+
+  # A language port, where Interlock verifies work done elsewhere rather than
+  # performing it. `implementation: external` is what makes that expressible.
+  # - name: port-calc-core
+  #   kind: field_rename
+  #   provider: calc-core
+  #   old: calc_legacy_c
+  #   new: calc_py
+  #   implementation: external
+  #   reason: C implementation replaced by Python; consumers must still pass.

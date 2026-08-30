@@ -256,7 +256,18 @@ class TestDiscover:
     def test_it_runs_every_discovery_agent(self, at_repo_root):
         result = core.discover("fixtures", "account-service", "customer_id", "account_id")
         assert result["agents_failed"] == []
-        assert len(result["agents_run"]) == 5
+        # The set, not a count: when this changes it should say which agent
+        # appeared or vanished, not just that the number moved.
+        assert set(result["agents_run"]) == {
+            "repo-map",
+            "api-contract-discovery",
+            "event-contract-discovery",
+            "db-schema-discovery",
+            "polyglot-source-discovery",
+            # Runs but returns nothing without IBM credentials, which is the
+            # designed default: the deterministic scanners stand alone.
+            "llm-discovery",
+        }
 
     def test_an_empty_graph_is_reported_not_crashed(self, lonely):
         result = core.discover(str(lonely), "svc-a", "lonely_field")

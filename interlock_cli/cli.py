@@ -504,6 +504,148 @@ def security(
         raise typer.Exit(core.EXIT_NOT_PROVEN_SAFE)
 
 
+def _print_campaign_plan(plan: dict) -> None:
+    """Show what would run, in the order it would run, before anything does."""
+    typer.echo(f"\n  {plan['components_root']}")
+    source = "watsonx.ai" if plan["source"] == "model" else "plan file"
+    typer.echo(f"  plan from: {source}\n")
+
+    for problem in plan["problems"]:
+        typer.secho(f"    MISS  {problem}", fg=typer.colors.RED)
+    if plan["cycles"]:
+        typer.secho(
+            f"    CYCLE {', '.join(plan['cycles'])} each depend on the other; "
+            f"nothing can run until that is resolved.",
+            fg=typer.colors.RED,
+        )
+    if plan["problems"] or plan["cycles"]:
+        typer.echo("")
+
+    if not plan["changes"]:
+        typer.secho("  no runnable changes", fg=typer.colors.YELLOW)
+        typer.echo("")
+        return
+
+    typer.secho(f"  {len(plan['changes'])} change(s), in dependency order:", bold=True)
+    for position, change in enumerate(plan["changes"], start=1):
+        typer.echo(
+            f"    {position}. {change['name']:<22} {change['provider']:<20} "
+            f"{change['kind']:<22} {change['old']} -> {change['new']}"
+        )
+        if change["reason"]:
+            typer.echo(f"       {change['reason']}")
+        if change["consumers"]:
+            typer.echo(f"       consumers: {', '.join(change['consumers'])}")
+    typer.echo("")
+
+
+@app.command()
+def campaign(
+    plan_file: Optional[str] = typer.Option(
+        None, "--plan", help="A YAML or JSON file listing the changes."
+    ),
+    request: Optional[str] = typer.Option(
+        None, "--request",
+        help="Describe the migration in a sentence; watsonx.ai decomposes it.",
+    ),
+    components_root: str = _ROOT,
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show the plan and stop. Nothing runs."
+    ),
+    keep_going: bool = typer.Option(
+        False, "--keep-going",
+        help="Attempt later changes even after one is not proven safe.",
+    ),
+    db: str = _DB,
+    as_json: bool = _JSON,
+) -> None:
+    """
+    Run a set of related changes as one unit, and report one combined verdict.
+
+    A real migration is rarely one change. This takes several, orders them so a
+    provider is changed before anything that consumes it, runs each through the
+    ordinary pipeline, and reports a verdict per change plus one for the whole.
+
+    Give it either a plan file - deterministic, reviewable, no credentials - or
+    a sentence, which watsonx.ai decomposes into candidate changes. The model
+    only chooses what gets CHECKED: every change it proposes then runs the same
+    agents and is judged by the same deterministic gate.
+
+    The campaign is VERIFIED only when every change in it is. There is no
+    partial credit, because the changes are related: one unproven change means
+    nobody verified the state the estate would end up in.
+    """
+    if not plan_file and not request:
+        typer.secho("give me --plan <file> or --request \"...\"",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(core.EXIT_ERROR)
+
+    entries = None
+    if plan_file:
+        try:
+            from orchestrator.campaign import load_plan_file
+
+            entries = load_plan_file(plan_file)
+        except Exception as exc:  # noqa: BLE001
+            typer.secho(f"could not read {plan_file}: {exc}",
+                        fg=typer.colors.RED, err=True)
+            raise typer.Exit(core.EXIT_ERROR)
+
+    try:
+        plan = core.campaign_plan(components_root, entries, request or "")
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"could not build a plan: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(core.EXIT_ERROR)
+
+    if not as_json:
+        _print_campaign_plan(plan)
+
+    if request and plan["source"] == "model" and not plan["changes"]:
+        if not as_json:
+            typer.secho(
+                "  watsonx.ai produced no runnable changes. It is either not "
+                "configured\n  (`interlock doctor`), or the request named no "
+                "concrete symbol to change.\n  A --plan file always works "
+                "without credentials.",
+                fg=typer.colors.YELLOW,
+            )
+            typer.echo("")
+
+    if dry_run or not plan["runnable"]:
+        payload = {k: v for k, v in plan.items() if k != "_planned"}
+        if as_json:
+            typer.echo(json.dumps(payload, indent=2, default=str))
+        raise typer.Exit(
+            core.EXIT_OK if dry_run and plan["runnable"] else core.EXIT_NOT_PROVEN_SAFE
+        )
+
+    conn = core.open_ledger(db)
+    description = request or f"campaign from {plan_file}"
+    result = core.campaign_run(conn, description, plan, stop_on_failure=not keep_going)
+
+    if as_json:
+        typer.echo(json.dumps(result, indent=2, default=str))
+    else:
+        colour = (
+            typer.colors.GREEN if result["result"] == "VERIFIED" else typer.colors.RED
+        )
+        typer.secho(f"  {result['result']}", fg=colour, bold=True)
+        typer.echo(f"  {result['reason']}\n")
+        for change in result["changes"]:
+            if change["result"] == "VERIFIED":
+                mark, fg = "OK  ", typer.colors.GREEN
+            elif change["result"] == "not_run":
+                mark, fg = "--  ", None
+            else:
+                mark, fg = "FAIL", typer.colors.RED
+            typer.secho(f"    {mark:<5}", fg=fg, nl=False)
+            typer.echo(f"{change['name']:<22} {change['reason'][:90]}")
+        typer.echo("")
+
+    if result["result"] != "VERIFIED":
+        raise typer.Exit(core.EXIT_NOT_PROVEN_SAFE)
+
+
 @app.command()
 def check(
     old: str = typer.Option(..., "--old", help="Symbol being replaced."),

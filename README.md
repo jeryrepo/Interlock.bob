@@ -142,10 +142,12 @@ change is not proven safe**, so it works as a pre-push hook or a CI step:
 interlock check --old customer_id --new account_id --provider account-service || echo "blocked"
 ```
 
-Other commands: `discover`, `doctor`, `init` (wire another repository's coding
-agent to Interlock), `start`, `approve`, `gate`, `status`, `list`, `evidence`,
-`review`, `agents`, and — with IBM credentials — `models`, `narrate` and
-`live`. Add `--json` to any of them for machine-readable output.
+Other commands: `discover`, `security`, `campaign` (several related changes as
+one unit), `manifest` (generate per-component `interlock.toml`), `doctor`,
+`init` (wire another repository's coding agent to Interlock), `start`,
+`approve`, `gate`, `status`, `list`, `evidence`, `review`, `agents`, and — with
+IBM credentials — `models`, `narrate` and `live`. Add `--json` to any of them
+for machine-readable output.
 
 **Are my IBM credentials actually working?** `doctor` reports what is
 configured without calling anything; `live` proves it:
@@ -217,6 +219,54 @@ interlock check --implementation external --old calc_legacy_c --new calc_py --pr
 `interlock doctor --components-root ./services` reports what it would see and
 warns if your working directory sits inside the components root, which would
 make the workspace copy grow on every run.
+
+### Security findings
+
+```bash
+interlock security --components-root ./services --old customer_id --new account_id --verbose
+```
+
+Reports committed secrets and credential files, the changed symbol flowing into
+logs or authorisation code, disabled TLS verification and plaintext endpoints.
+Exits non-zero on any finding, so it works as a pre-push hook.
+
+Findings are **advisory**: they are recorded as evidence and rendered into the PR
+review, but they never change the gate's verdict. A pipeline opts into treating
+them as blocking:
+
+```bash
+interlock check --old customer_id --new account_id --provider account-service --fail-on-security
+```
+
+It reports findings, and when there are none it says exactly that. **It will
+never tell you a change is secure** — no scanner can establish that, and a tool
+that claims it teaches people to stop looking. Secrets are redacted before they
+reach evidence, so a finding in a PR comment does not copy the credential.
+
+### A migration that is more than one change
+
+Real migrations are several related changes with an order. A campaign runs them
+as one unit — provider before consumer — and reports one combined verdict:
+
+```bash
+interlock campaign --plan docs/campaign-example.yaml --components-root ./services --dry-run
+```
+
+Drop `--dry-run` to run it. The campaign is VERIFIED only when **every** change
+in it is; there is no partial credit, because one unproven change means nobody
+verified the state the estate ends up in. Once a change fails, the ones after it
+are reported `not_run` rather than given a verdict they never earned.
+
+With watsonx.ai configured you can describe the migration instead:
+
+```bash
+interlock campaign --request "move the estate off customer_id" --components-root ./services --dry-run
+```
+
+The model decomposes the sentence into candidate changes. **It chooses what gets
+checked, never what passes** — each change then runs the same agents and is
+judged by the same deterministic gate. A proposed change naming a component that
+does not exist is discarded before anything runs.
 
 ### The three kinds of change it covers
 
