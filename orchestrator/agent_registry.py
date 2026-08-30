@@ -31,6 +31,7 @@ from typing import Any, Callable
 from pydantic import BaseModel
 
 import orchestrator.adapters as ad
+from orchestrator.gate import REHEARSAL_STEP_KIND
 from orchestrator.schemas import (
     DiscoveryResult,
     ImplementationResult,
@@ -78,6 +79,14 @@ DB_DISCOVERY = AgentSpec(
     "db-schema-discovery", "agents.discovery.db_schema",
     DiscoveryResult, ad.discovery,
 )
+# Non-Python consumers (TypeScript, Java, Go, ...). The AST agents above parse
+# Python only, so without this a consumer in any other language got no
+# dependency edge, was never required by the gate, and a migration could read
+# VERIFIED while that consumer was never migrated at all.
+POLYGLOT_DISCOVERY = AgentSpec(
+    "polyglot-source-discovery", "agents.discovery.polyglot_source",
+    DiscoveryResult, ad.discovery,
+)
 
 COMPATIBILITY_STRATEGY = AgentSpec(
     "compatibility-strategy", "agents.planning.compatibility_strategy",
@@ -101,9 +110,27 @@ SUBSCRIBER_SWITCH = AgentSpec(
     per_component=True, step_kind="subscribe",
 )
 
+# External mode: Interlock verifies rather than edits. Same schema, same
+# adapter, same work item — only the means of getting there differs.
+EXTERNAL_PROVIDER = AgentSpec(
+    "external-provider-change", "agents.implementation.external_change",
+    ImplementationResult, ad.implementation, step_kind="provider_patch",
+)
+EXTERNAL_CONSUMER = AgentSpec(
+    "external-consumer-change", "agents.implementation.external_change",
+    ImplementationResult, ad.implementation,
+    per_component=True, step_kind="migrate",
+)
+EXTERNAL_SUBSCRIBER = AgentSpec(
+    "external-subscriber-change", "agents.implementation.external_change",
+    ImplementationResult, ad.implementation,
+    per_component=True, step_kind="subscribe",
+)
+
 COEXISTENCE_REHEARSAL = AgentSpec(
     "coexistence-rehearsal", "agents.verification.coexistence_rehearsal",
     VerificationResult, ad.verification,
+    step_kind=REHEARSAL_STEP_KIND,
 )
 CONTRACT_TEST = AgentSpec(
     "contract-test", "agents.verification.contract_test",
@@ -133,7 +160,7 @@ CRITIC = AgentSpec(
 
 AGENT_REGISTRY: dict[tuple[str, str], tuple[AgentSpec, ...]] = {
     # --- field rename -------------------------------------------------------
-    ("field_rename", "DISCOVERY"): (REPO_MAP, API_DISCOVERY, EVENT_DISCOVERY, DB_DISCOVERY),
+    ("field_rename", "DISCOVERY"): (REPO_MAP, API_DISCOVERY, EVENT_DISCOVERY, DB_DISCOVERY, POLYGLOT_DISCOVERY),
     ("field_rename", "PLANNING"): (COMPATIBILITY_STRATEGY,),
     ("field_rename", "MODIFY"): (PROVIDER_PATCH, CONSUMER_MIGRATION),
     ("field_rename", "REHEARSE"): (COEXISTENCE_REHEARSAL,),
@@ -141,7 +168,7 @@ AGENT_REGISTRY: dict[tuple[str, str], tuple[AgentSpec, ...]] = {
 
     # --- API contract change ------------------------------------------------
     # No db-schema discovery: an API contract change does not live in SQL.
-    ("api_contract_change", "DISCOVERY"): (REPO_MAP, API_DISCOVERY, EVENT_DISCOVERY),
+    ("api_contract_change", "DISCOVERY"): (REPO_MAP, API_DISCOVERY, EVENT_DISCOVERY, POLYGLOT_DISCOVERY),
     ("api_contract_change", "PLANNING"): (COMPATIBILITY_STRATEGY,),
     ("api_contract_change", "MODIFY"): (PROVIDER_PATCH, CONSUMER_MIGRATION),
     ("api_contract_change", "REHEARSE"): (COEXISTENCE_REHEARSAL,),
@@ -149,7 +176,7 @@ AGENT_REGISTRY: dict[tuple[str, str], tuple[AgentSpec, ...]] = {
 
     # --- webhook -> pub/sub -------------------------------------------------
     # Event discovery only; the consumers are subscribers, not API callers.
-    ("transport_migration", "DISCOVERY"): (REPO_MAP, EVENT_DISCOVERY),
+    ("transport_migration", "DISCOVERY"): (REPO_MAP, EVENT_DISCOVERY, POLYGLOT_DISCOVERY),
     ("transport_migration", "PLANNING"): (COMPATIBILITY_STRATEGY,),
     ("transport_migration", "MODIFY"): (PROVIDER_PATCH, SUBSCRIBER_SWITCH),
     ("transport_migration", "REHEARSE"): (COEXISTENCE_REHEARSAL,),
@@ -159,8 +186,30 @@ AGENT_REGISTRY: dict[tuple[str, str], tuple[AgentSpec, ...]] = {
 }
 
 
-def agents_for(kind: str, phase: str) -> tuple[AgentSpec, ...]:
-    """Registered agents for a (kind, phase), or an empty tuple."""
+# MODIFY-phase agents when the work was done outside Interlock. Every other
+# phase — discovery, planning, rehearsal, verification — is identical, because
+# only the means of changing the code differs, never the proof required.
+EXTERNAL_MODIFY: dict[str, tuple[AgentSpec, ...]] = {
+    "field_rename": (EXTERNAL_PROVIDER, EXTERNAL_CONSUMER),
+    "api_contract_change": (EXTERNAL_PROVIDER, EXTERNAL_CONSUMER),
+    "transport_migration": (EXTERNAL_PROVIDER, EXTERNAL_SUBSCRIBER),
+}
+
+_DEFAULT_EXTERNAL_MODIFY: tuple[AgentSpec, ...] = (EXTERNAL_PROVIDER, EXTERNAL_CONSUMER)
+
+
+def agents_for(
+    kind: str, phase: str, implementation: str = "builtin"
+) -> tuple[AgentSpec, ...]:
+    """
+    Registered agents for a (kind, phase).
+
+    In ``external`` mode the MODIFY phase is swapped for verify-only agents; an
+    unknown kind still gets the default external pair rather than nothing, so a
+    new transition type is usable before anyone writes a rewriter for it.
+    """
+    if implementation == "external" and phase == "MODIFY":
+        return EXTERNAL_MODIFY.get(kind, _DEFAULT_EXTERNAL_MODIFY)
     return AGENT_REGISTRY.get((kind, phase), ())
 
 

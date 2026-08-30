@@ -27,6 +27,9 @@ import yaml
 
 from orchestrator.schemas import Dependency, DiscoveryResult, Evidence
 
+# One definition of what counts as a component, shared with repo_map.
+from agents.discovery.repo_map import component_dirs
+
 # Name of the provider component
 _PROVIDER = "account-service"
 
@@ -135,10 +138,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
         )
 
     # ── Step 2: scan all other fixture dirs for API consumers ─────────────────
-    consumer_dirs = sorted(
-        p for p in fixtures_root.iterdir()
-        if p.is_dir() and p.name != provider
-    )
+    consumer_dirs = component_dirs(fixtures_root, exclude=provider)
 
     for consumer_dir in consumer_dirs:
         component = consumer_dir.name

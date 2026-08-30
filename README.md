@@ -85,6 +85,39 @@ Three ways in: a CLI, an MCP server for coding agents, and the API + Streamlit U
 
 ### As a CLI (no server required)
 
+**Recommended: install globally with pipx** — the `interlock` command then
+works in any terminal, any directory, with no venv activation, and edits to
+this repo take effect immediately (`-e`):
+
+```bash
+py -m pip install --user pipx
+```
+
+```bash
+py -m pipx ensurepath
+```
+
+Open a **new** terminal (PATH changes do not reach existing ones — `pipx` being
+"not recognized" right after installing it means exactly this; `py -m pipx`
+works meanwhile), then from this repository's root:
+
+```bash
+pipx install -e ".[mcp]"
+```
+
+This is a one-time install of the **Interlock repo only**. Repositories where
+Interlock is used as a tool install nothing — point them at this installation
+with `interlock init <repo>` or `interlock init --global`.
+
+**Alternative: a project venv.** Activate it first, then install once:
+
+```bash
+.\.venv\Scripts\Activate.ps1
+```
+
+(bash / git-bash: `source .venv/Scripts/activate`; create it first with
+`python -m venv .venv` on a fresh clone.)
+
 ```bash
 pip install -e .
 ```
@@ -92,6 +125,14 @@ pip install -e .
 ```bash
 interlock check --old customer_id --new account_id --provider account-service
 ```
+
+> **`interlock: command not found` / "no such command"?** The install puts
+> `interlock.exe` inside `.venv\Scripts`, so the command only exists in a shell
+> where that venv is **activated**. Activate it (above) and retry — nothing
+> needs reinstalling. From a non-activated shell,
+> `.\.venv\Scripts\interlock.exe` works too. If the venv is genuinely fresh,
+> run `pip install -e ".[mcp]"` (the `[mcp]` extra also covers the MCP server
+> that IBM Bob launches).
 
 Discovers every consumer, migrates and verifies them on an isolated copy of the
 component tree, and prints the deterministic verdict. **Exits non-zero when the
@@ -101,8 +142,81 @@ change is not proven safe**, so it works as a pre-push hook or a CI step:
 interlock check --old customer_id --new account_id --provider account-service || echo "blocked"
 ```
 
-Other commands: `start`, `approve`, `gate`, `status`, `list`, `evidence`,
-`review`, `agents`. Add `--json` to any of them for machine-readable output.
+Other commands: `discover`, `doctor`, `init` (wire another repository's coding
+agent to Interlock), `start`, `approve`, `gate`, `status`, `list`, `evidence`,
+`review`, `agents`, and — with IBM credentials — `models`, `narrate` and
+`live`. Add `--json` to any of them for machine-readable output.
+
+**Are my IBM credentials actually working?** `doctor` reports what is
+configured without calling anything; `live` proves it:
+
+```bash
+interlock live
+```
+
+Four stages — variables present, API key accepted by IBM Cloud IAM, model
+available in your region, one 5-token inference — each isolated so a failure
+names the variable at fault (`IBM_CLOUD_API_KEY` wrong vs
+`WATSONX_PROJECT_ID` wrong vs model not in region). Exits 0 only when all
+four pass; only the last stage costs anything, and it is capped at 5 tokens.
+
+### Pointing it at your own repository
+
+Start read-only. `discover` runs the discovery agents against your source, prints
+what it sees, and writes nothing — no workspace copy, no git, no ledger:
+
+```bash
+interlock discover --old customer_id --provider account-service --components-root ./services
+```
+
+Interlock's one structural requirement is that **each immediate subdirectory of
+`--components-root` is a component**. Build output, dependency caches and dotted
+directories are skipped; everything else is a candidate consumer. Read the output
+before running anything:
+
+| What you see | What it means |
+| --- | --- |
+| Your services listed | Good — proceed |
+| `docs`, `deploy`, `.egg-info` listed as components | The root is one level too high |
+| One component named `services` or `src` | The root is one level too low — point it *at* that directory |
+| Components found, zero edges | Nothing outside the provider references the symbol |
+
+When the root looks wrong, `discover` scans for directories that look more like a
+components root and offers them, marking any that contains your `--provider`:
+
+```
+Directories that look more like a components root:
+
+  --components-root /repo/services    (3: orders, billing, shipping)  <- contains your provider
+```
+
+Two things to set up before a real `check`:
+
+- **`interlock.toml` in any component whose tests are not pytest.** Without one
+  it is tested with `python -m pytest .`, which cannot run a Go or Java suite —
+  and the gate then correctly refuses the change.
+
+  ```toml
+  [component]
+  language = "go"
+  test_command = "go test ./..."
+  ```
+
+- **`coexistence_command` in the provider's manifest**, unless it is a FastAPI
+  app in `service.py` exposing `app` and serving `/health`. The gate requires a
+  passing rehearsal for every change kind.
+
+Then run the change itself, with `--implementation external` for anything the
+built-in Python rewriters cannot perform — a language port, a framework swap,
+anything non-Python:
+
+```bash
+interlock check --implementation external --old calc_legacy_c --new calc_py --provider calc-core --components-root ./services
+```
+
+`interlock doctor --components-root ./services` reports what it would see and
+warns if your working directory sits inside the components root, which would
+make the workspace copy grow on every run.
 
 ### The three kinds of change it covers
 
@@ -155,12 +269,48 @@ repo, `pip install -e ".[mcp]"`, and the agent can call `interlock_check`,
 `interlock_gate`, `interlock_evidence` and `interlock_dependency_graph`
 directly.
 
+Those shipped files use relative paths, so they work when the agent opens
+*Interlock's own checkout*. The normal case is the other direction — you are
+working in **your own repository** and want the agent there to check changes.
+One command wires it up:
+
+```bash
+interlock init ../your-repo --components-root services
+```
+
+It writes `.bob/mcp.json` and `.mcp.json` into that repository with absolute
+paths (this Python environment, your components root, a ledger and workspace
+under `your-repo/.interlock/`), preserving any other MCP servers already
+configured there. Open the repository in Bob and the tools are available; no
+IBM account or credential is involved. Re-run it any time — it replaces only
+the `interlock` entry.
+
+To make the tools available in **every** workspace Bob opens — so removing a
+folder from a workspace never takes Interlock with it — configure it globally
+instead:
+
+```bash
+interlock init --global
+```
+
+That writes `~/.bob/settings/mcp.json`, which is the file Bob actually reads
+for global scope — **not** `~/.bob/mcp.json`, which it silently ignores. A
+workspace-scope entry with the same name overrides the global one when both
+are present (Bob's panel then lists both scopes; that is override, not
+duplication). The global entry defaults `components_root` to the bundled demo
+fixtures; agents pass `components_root` per call when working in a real
+repository.
+
 An agent can *read* the verdict but never influence it: there is no tool to
 override the gate or approve legacy removal.
 
 ### As a service
 
 Two processes: a FastAPI backend and a Streamlit UI that talks to it over HTTP.
+
+The sidebar picks the change kind, provider and symbols, and **Run real agents**
+is on by default — so the graph, the evidence and the commit SHAs are real.
+Switch it off to watch the stub workflow instead.
 
 **1. Activate the virtual environment**
 

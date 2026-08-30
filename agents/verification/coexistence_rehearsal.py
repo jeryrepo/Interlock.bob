@@ -58,6 +58,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from orchestrator.manifest import load as manifest_for
+
 from agents.verification.rehearsal.probe import (
     PROBE_ACCOUNT_KEY,
     check_payload,
@@ -78,6 +80,9 @@ _ASGI_TARGET = "service:app"
 _HEALTH_ATTEMPTS = 40
 _HEALTH_DELAY_SECONDS = 0.25
 _SHUTDOWN_GRACE_SECONDS = 5
+
+# A provider's own coexistence command is arbitrary, so it is bounded too.
+_DECLARED_CHECK_TIMEOUT_SECONDS = 300
 
 _OUTPUT_TAIL_CHARS = 3000
 
@@ -194,14 +199,30 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
     new_field = data.get("new_field", "account_id")
     expect_new = bool(data.get("expect_new"))
 
-    provider_dir = (
-        Path(repo_path) / data.get("provider_path", _DEFAULT_PROVIDER_PATH)
-    )
+    # `provider_path` may be absolute (the orchestrator hands over a path inside
+    # the isolated workspace) or relative to repo_path (the documented default).
+    # Joining unconditionally produced `<workspace>/account-service/account-service`
+    # when repo_path was already the provider directory, so the rehearsal never
+    # found the provider and never actually ran.
+    raw_provider_path = data.get("provider_path") or _DEFAULT_PROVIDER_PATH
+    provider_dir = Path(raw_provider_path)
+    if not provider_dir.is_absolute():
+        provider_dir = Path(repo_path) / provider_dir
 
     if not provider_dir.is_dir():
         return _result(change_id, _OUTCOME_NOT_RUN, steps=[], detail=(
             f"provider directory not found: {provider_dir}"
         ))
+
+    # A provider that declares its own coexistence check runs that instead of
+    # the HTTP probe below. The default assumes the provider is a web service;
+    # a C library, a batch job or a message publisher is not, and starting one
+    # with `uvicorn service:app` merely exits. Same contract either way: the
+    # command proves both paths are live, and a non-zero exit means it did not.
+    declared = manifest_for(provider_dir).coexistence_command
+    if declared:
+        return _run_declared_check(change_id, provider_dir, declared,
+                                   old_field, new_field, expect_new)
 
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
@@ -252,6 +273,70 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
         # the next rehearsal, and a rehearsal that cannot rerun is worse than
         # one that failed.
         _stop_provider(process)
+
+
+def _run_declared_check(
+    change_id: str,
+    provider_dir: Path,
+    command: list[str],
+    old_field: str,
+    new_field: str,
+    expect_new: bool,
+) -> dict[str, Any]:
+    """
+    Run a provider's own coexistence command.
+
+    The symbols and the expectation are passed as environment variables so the
+    command can assert against them without Interlock knowing anything about how
+    the provider works. Executed without a shell.
+    """
+    import os
+
+    from orchestrator.manifest import environment_for, resolve_program
+
+    # environment_for() puts Git's POSIX tools on PATH when the command is a
+    # bundled shell, so a declared `sh coexistence_check.sh` can use grep and
+    # sed the way its author intended.
+    env = {
+        **(environment_for(list(command)) or os.environ),
+        "INTERLOCK_OLD_SYMBOL": old_field,
+        "INTERLOCK_NEW_SYMBOL": new_field,
+        "INTERLOCK_EXPECT_NEW": "1" if expect_new else "0",
+    }
+    try:
+        result = subprocess.run(
+            resolve_program(list(command)), cwd=str(provider_dir),
+            capture_output=True, text=True, env=env,
+            timeout=_DECLARED_CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return _result(change_id, _OUTCOME_FAILED, steps=[], detail=(
+            f"declared coexistence check timed out after "
+            f"{_DECLARED_CHECK_TIMEOUT_SECONDS}s"
+        ))
+    except OSError as exc:
+        return _result(change_id, _OUTCOME_NOT_RUN, steps=[], detail=(
+            f"could not execute the declared coexistence command {command!r}: {exc}"
+        ))
+
+    output = (result.stdout + result.stderr)[-_OUTPUT_TAIL_CHARS:]
+    passed = result.returncode == 0
+    step = _step(
+        "declared-coexistence-check",
+        passed,
+        f"{' '.join(command)} -> exit {result.returncode}",
+    )
+    step["output_tail"] = output
+    return _result(
+        change_id,
+        _OUTCOME_PASSED if passed else _OUTCOME_FAILED,
+        [step],
+        detail=(
+            f"provider proved coexistence via its own check: {' '.join(command)}"
+            if passed
+            else f"declared coexistence check failed (exit {result.returncode})"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -35,6 +35,22 @@ class _SpecBase(BaseModel):
 
     notes: str | None = None
 
+    implementation: Literal["builtin", "external"] = "builtin"
+    """
+    Who performs the code change.
+
+    ``builtin``  — Interlock's own rewriters edit the source. Python only, and
+                   only for the shapes those agents recognise.
+    ``external`` — a human or another coding agent (IBM Bob) already did the
+                   work; Interlock verifies the symbols moved, the component's
+                   own tests pass, and a real commit exists. Language-agnostic,
+                   and the only workable mode for transitions no rewriter can
+                   perform — a C-to-Python port, a framework swap, a rewrite.
+
+    This is a noun about the change, not gate policy: the gate requires exactly
+    the same proof either way. See ADR-0002.
+    """
+
 
 class FieldRenameSpec(_SpecBase):
     """A schema or model field rename, e.g. customer_id -> account_id."""

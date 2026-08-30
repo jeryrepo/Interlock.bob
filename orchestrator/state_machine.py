@@ -117,9 +117,22 @@ def can_advance(conn: sqlite3.Connection, change_id: str, current_state: str) ->
         return all(w["status"] in terminal for w in items)
 
     if current_state == "REHEARSE":
-        # Coexistence rehearsal evidence must exist.
+        # Evidence about the rehearsal itself must exist.
+        #
+        # Accepting any test_result row was too weak: a contract test from an
+        # earlier phase satisfied this check, so a change could leave REHEARSE
+        # having never rehearsed anything.
+        #
+        # Deliberately NOT conditioned on the rehearsal having passed. A failed
+        # rehearsal must still reach VERIFY so the gate can render
+        # NOT_PROVEN_SAFE; blocking here would stall the change instead of
+        # failing it, and a stalled change reports no verdict at all.
         evidence = ledger.get_evidence(conn, change_id)
-        return any(e["claim_type"] == "test_result" for e in evidence)
+        return any(
+            e["subject"] == "coexistence-rehearsal"
+            and e["claim_type"] in ("test_result", "risk")
+            for e in evidence
+        )
 
     if current_state == "VERIFY":
         # Every work item must have reached a terminal status.

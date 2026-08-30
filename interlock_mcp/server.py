@@ -5,7 +5,10 @@ Interlock as a set of MCP tools.
 
 This is the mechanism behind "pull this repo into IBM Bob and it just works".
 Bob reads MCP server configuration from `.bob/mcp.json` (project) or
-`~/.bob/mcp.json` (global); Claude Code, Cursor and Copilot read `.mcp.json`.
+`~/.bob/settings/mcp.json` (global — note the `settings/`; a `~/.bob/mcp.json`
+is silently ignored, verified against the Bob 2.0 application bundle);
+Claude Code, Cursor and Copilot read `.mcp.json`. `interlock init` writes
+either scope for another repository.
 Both files ship in this repository pointing at this module over stdio, so an
 agent that clones the repo can call Interlock instead of reimplementing the
 checks by hand.
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer  # MCP SDK 2.x (was FastMCP in 1.x)
@@ -39,6 +43,27 @@ _DEFAULT_ROOT = os.environ.get("INTERLOCK_COMPONENTS_ROOT", "fixtures")
 
 def _render(payload: Any) -> str:
     return json.dumps(payload, indent=2, default=str)
+
+
+@contextmanager
+def _ledger(db_path: str):
+    """
+    Open a ledger for one tool call and close it afterwards.
+
+    An MCP server is long-lived: a client starts it once and keeps it running
+    for the whole session. Leaking a SQLite handle per tool call therefore
+    accumulates indefinitely, and on Windows each open handle blocks deletion of
+    the file it points at — which is how an editor-spawned server left a test
+    directory permanently locked.
+    """
+    conn = core.open_ledger(db_path)
+    try:
+        yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 - closing must never mask a tool error
+            pass
 
 
 @mcp.tool()
@@ -71,8 +96,8 @@ def interlock_check(
         db_path: SQLite ledger path
     """
     spec = core.build_spec(kind, provider, old_symbol, new_symbol, components_root)
-    conn = core.open_ledger(db_path)
-    return _render(core.check(conn, f"{old_symbol} -> {new_symbol}", spec))
+    with _ledger(db_path) as conn:
+        return _render(core.check(conn, f"{old_symbol} -> {new_symbol}", spec))
 
 
 @mcp.tool()
@@ -93,8 +118,8 @@ def interlock_start(
     the COORDINATE gate awaiting approval.
     """
     spec = core.build_spec(kind, provider, old_symbol, new_symbol, components_root)
-    conn = core.open_ledger(db_path)
-    return _render(core.start(conn, f"{old_symbol} -> {new_symbol}", spec))
+    with _ledger(db_path) as conn:
+        return _render(core.start(conn, f"{old_symbol} -> {new_symbol}", spec))
 
 
 @mcp.tool()
@@ -110,8 +135,8 @@ def interlock_approve_coordination(
     legacy field — that approval is reserved for a human and is not available
     through this server.
     """
-    conn = core.open_ledger(db_path)
-    return _render(core.approve(conn, change_id, "coordinate", approved_by))
+    with _ledger(db_path) as conn:
+        return _render(core.approve(conn, change_id, "coordinate", approved_by))
 
 
 @mcp.tool()
@@ -123,15 +148,15 @@ def interlock_gate(change_id: str, db_path: str = _DEFAULT_DB) -> str:
     be overridden — not by this server, not by any agent. Read it; do not argue
     with it.
     """
-    conn = core.open_ledger(db_path)
-    return _render(core.gate_status(conn, change_id))
+    with _ledger(db_path) as conn:
+        return _render(core.gate_status(conn, change_id))
 
 
 @mcp.tool()
 def interlock_status(change_id: str, db_path: str = _DEFAULT_DB) -> str:
     """Return a change's workflow state, kind and current gate verdict."""
-    conn = core.open_ledger(db_path)
-    return _render(core.status(conn, change_id))
+    with _ledger(db_path) as conn:
+        return _render(core.status(conn, change_id))
 
 
 @mcp.tool()
@@ -152,8 +177,8 @@ def interlock_evidence(
             test_result | risk. "risk" is the useful one for diagnosing a
             NOT_PROVEN_SAFE verdict.
     """
-    conn = core.open_ledger(db_path)
-    items = core.evidence(conn, change_id)
+    with _ledger(db_path) as conn:
+        items = core.evidence(conn, change_id)
     if claim_type:
         items = [e for e in items if e["claim_type"] == claim_type]
     return _render(items)
@@ -168,8 +193,160 @@ def interlock_dependency_graph(change_id: str, db_path: str = _DEFAULT_DB) -> st
     consumer found only by reading source — the kind that breaks production
     because nobody knew it existed.
     """
-    conn = core.open_ledger(db_path)
-    return _render(core.graph(conn, change_id))
+    with _ledger(db_path) as conn:
+        return _render(core.graph(conn, change_id))
+
+
+@mcp.tool()
+def interlock_discover(
+    old_symbol: str,
+    provider: str,
+    new_symbol: str = "",
+    kind: str = "field_rename",
+    components_root: str = _DEFAULT_ROOT,
+) -> str:
+    """
+    Report what Interlock sees in this repository, without changing anything.
+
+    Run this BEFORE interlock_check when working in an unfamiliar codebase, or
+    whenever the user asks which services depend on something. It reads source
+    only: no workspace copy, no git, no tests executed, no ledger written, so it
+    answers in seconds where a full check takes minutes.
+
+    Returns the components found, the dependency edges, and - most usefully -
+    which consumers appear in NO api contract. Those couple through events or a
+    shared database schema, so no contract review would surface them; they are
+    the ones that break production.
+
+    Also reports each component's detected toolchain and whether it needs an
+    `interlock.toml`. A component without one is tested with `python -m pytest`,
+    which on a Go or Java service proves nothing.
+
+    An empty `edges` list means nothing outside the provider references that
+    symbol - check the spelling, or `components_root`, before concluding the
+    change is safe.
+    """
+    return _render(
+        core.discover(components_root, provider, old_symbol, new_symbol or None, kind)
+    )
+
+
+@mcp.tool()
+def interlock_manifest(
+    components_root: str = _DEFAULT_ROOT,
+    write: bool = False,
+) -> str:
+    """
+    Propose an `interlock.toml` for each component, from its build files.
+
+    Interlock runs each component's own test suite, and needs to be told how
+    when the component is not a pytest project. This reads the markers already
+    present - go.mod, package.json, pom.xml, Cargo.toml, a Makefile with a
+    `test:` target - and reports the manifest each implies.
+
+    `write=False` (the default) only previews. Pass `write=True` ONLY when the
+    user has asked for the files to be created: it writes `interlock.toml` into
+    each component directory. Existing manifests are never overwritten.
+
+    Every command is a guess until it runs. Show the user what was detected and
+    let them confirm it is how their tests are actually invoked.
+    """
+    return _render(core.manifest_plan(components_root, write=write))
+
+
+@mcp.tool()
+def interlock_doctor(components_root: str = _DEFAULT_ROOT) -> str:
+    """
+    Report whether Interlock is correctly set up here, and what is missing.
+
+    Checks git, the ledger and workspace paths, the components root (how many
+    components it sees and how many declare a manifest), and which optional IBM
+    integrations are configured. Calls no model and spends no credits.
+
+    Use it when a check behaves unexpectedly, or before running anything in a
+    repository for the first time. Everything reported as optional is genuinely
+    optional - the gate, the CLI and these tools work with no IBM account.
+    """
+    from interlock_cli.cli import _components_root_check, _mcp_server_path
+    from orchestrator import watsonx as _watsonx
+    from orchestrator.settings import load as _load_settings
+
+    import shutil
+
+    settings = _load_settings()
+    health = _watsonx.health(settings.watsonx)
+    return _render({
+        "components_root": _components_root_check(components_root),
+        "git": shutil.which("git") is not None,
+        "ledger": settings.db_path,
+        "workspace": settings.workspace,
+        "mcp_server": str(_mcp_server_path() or ""),
+        "watsonx_narration": health,
+        "watsonx_orchestrate_configured": settings.orchestrate.configured,
+    })
+
+
+@mcp.tool()
+def interlock_models() -> str:
+    """
+    List the watsonx.ai chat models available in the configured region.
+
+    Needs no credentials and spends nothing - the catalogue endpoint is
+    unauthenticated. Use it when narration fails with a 404, which means the
+    configured WATSONX_MODEL_ID is not offered in this region. Models the
+    hackathon guide places out of scope are marked `forbidden`.
+    """
+    from orchestrator import watsonx as _watsonx
+    from orchestrator.settings import load as _load_settings
+
+    settings = _load_settings()
+    return _render({
+        "configured": settings.watsonx.model_id,
+        "available": _watsonx.list_chat_models(settings.watsonx),
+    })
+
+
+@mcp.tool()
+def interlock_narrate(change_id: str, db_path: str = _DEFAULT_DB) -> str:
+    """
+    Explain an already-decided verdict in plain English, using watsonx.ai.
+
+    The verdict is NOT produced here. It comes from the deterministic gate and
+    is returned verbatim alongside the prose; the model is handed the finished
+    decision and asked only to explain the blockers, and the gate's vocabulary
+    is stripped from what it writes. If narration is switched off or
+    unavailable, `narration` is null and the verdict still stands.
+
+    Requires IBM_CLOUD_API_KEY, WATSONX_PROJECT_ID and
+    INTERLOCK_ENABLE_NARRATION=1. Without them this returns the verdict and
+    says why narration was skipped, rather than failing.
+    """
+    from orchestrator import watsonx as _watsonx
+    from orchestrator.settings import load as _load_settings
+
+    settings = _load_settings()
+    with _ledger(db_path) as conn:
+        gate = core.gate_status(conn, change_id)
+        if not settings.watsonx.enabled:
+            return _render({
+                "gate": gate,
+                "narration": None,
+                "skipped": settings.watsonx.why_disabled(),
+            })
+        lines = []
+        for item in core.evidence(conn, change_id):
+            content = item.get("content") or {}
+            detail = (
+                content.get("detail") or content.get("risk") or content.get("outcome")
+            )
+            if detail:
+                lines.append(f"{item['subject']}: {detail}")
+
+    return _render({
+        "gate": gate,
+        "narration": _watsonx.narrate(gate, lines, settings.watsonx),
+        "skipped": None,
+    })
 
 
 @mcp.tool()
@@ -186,10 +363,10 @@ def interlock_review(change_id: str, db_path: str = _DEFAULT_DB) -> str:
     """
     from interlock_cli import review as review_mod
 
-    conn = core.open_ledger(db_path)
-    status = core.status(conn, change_id)
-    graph = core.graph(conn, change_id)
-    risks = [e for e in core.evidence(conn, change_id) if e["claim_type"] == "risk"]
+    with _ledger(db_path) as conn:
+        status = core.status(conn, change_id)
+        graph = core.graph(conn, change_id)
+        risks = [e for e in core.evidence(conn, change_id) if e["claim_type"] == "risk"]
     return review_mod.render_markdown(status, graph, risks)
 
 
@@ -225,8 +402,8 @@ def interlock_orchestration_map(db_path: str = _DEFAULT_DB) -> str:
 @mcp.tool()
 def interlock_list_changes(db_path: str = _DEFAULT_DB) -> str:
     """List known changes in this ledger, newest first."""
-    conn = core.open_ledger(db_path)
-    return _render(core.changes(conn))
+    with _ledger(db_path) as conn:
+        return _render(core.changes(conn))
 
 
 def main() -> None:

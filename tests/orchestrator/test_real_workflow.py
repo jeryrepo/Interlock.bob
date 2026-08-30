@@ -212,6 +212,15 @@ class TestGateGeneralisation:
         assert "notifier:webhook_quiet" in d.unresolved
 
         ledger.upsert_work_item(conn, "c1", "notifier", "verified", "webhook_quiet")
+        d = gate.evaluate_gate(conn, "c1")
+        assert d.result == "NOT_PROVEN_SAFE"
+        assert "billing:coexistence_rehearsal" in d.unresolved
+
+        # The provider must also have demonstrated that it holds both contracts
+        # open at once. Nothing else in the run proves that property.
+        ledger.upsert_work_item(
+            conn, "c1", "billing", "verified", gate.REHEARSAL_STEP_KIND
+        )
         assert gate.evaluate_gate(conn, "c1").result == "VERIFIED"
 
     def test_a_failed_provider_patch_blocks_the_gate(self, conn):
@@ -229,7 +238,51 @@ class TestGateGeneralisation:
         assert "account-service:provider_patch" in d.unresolved
 
         ledger.upsert_work_item(conn, "c1", "account-service", "verified", "provider_patch")
+        d = gate.evaluate_gate(conn, "c1")
+        assert d.result == "NOT_PROVEN_SAFE"
+        assert "account-service:coexistence_rehearsal" in d.unresolved
+
+        ledger.upsert_work_item(
+            conn, "c1", "account-service", "verified", gate.REHEARSAL_STEP_KIND
+        )
         assert gate.evaluate_gate(conn, "c1").result == "VERIFIED"
+
+    def test_a_failed_rehearsal_blocks_the_gate(self, conn):
+        """
+        The rehearsal proves the one property nothing else does: that a single
+        running provider serves the old and new shapes at once.
+
+        It used to write evidence and no work item, and the gate counts work
+        items and never reads evidence. So a rehearsal that failed — or that
+        never ran at all — left the verdict completely unchanged. Every
+        consumer verified plus a broken coexistence window still read VERIFIED.
+        """
+        ledger.create_change(conn, "c1", "x")
+        ledger.set_change_spec(conn, "c1", "field_rename", FIELD_RENAME_SPEC)
+        ledger.add_dependency(conn, "c1", "account-service", "checkout", "api", None)
+        ledger.upsert_work_item(conn, "c1", "checkout", "verified", "migrate")
+        ledger.upsert_work_item(
+            conn, "c1", "account-service", "verified", "provider_patch"
+        )
+        ledger.upsert_work_item(
+            conn, "c1", "account-service", "failed", gate.REHEARSAL_STEP_KIND
+        )
+
+        d = gate.evaluate_gate(conn, "c1")
+        assert d.result == "NOT_PROVEN_SAFE"
+        assert "account-service:coexistence_rehearsal" in d.unresolved
+
+    def test_a_missing_rehearsal_blocks_the_gate(self, conn):
+        """Absence of proof is not proof: no rehearsal row must block too."""
+        ledger.create_change(conn, "c1", "x")
+        ledger.set_change_spec(conn, "c1", "field_rename", FIELD_RENAME_SPEC)
+        ledger.add_dependency(conn, "c1", "account-service", "checkout", "api", None)
+        ledger.upsert_work_item(conn, "c1", "checkout", "verified", "migrate")
+        ledger.upsert_work_item(
+            conn, "c1", "account-service", "verified", "provider_patch"
+        )
+
+        assert gate.evaluate_gate(conn, "c1").result == "NOT_PROVEN_SAFE"
 
     def test_single_step_kinds_keep_unqualified_names(self, conn):
         """Legacy output shape is preserved for single-step change kinds."""
@@ -375,3 +428,67 @@ class TestCors:
             "/change-requests/nope/spec", headers={"Origin": "http://localhost:8501"}
         )
         assert resp.headers.get("access-control-allow-origin") == "*"
+
+
+# ---------------------------------------------------------------------------
+# Workspace path shape
+# ---------------------------------------------------------------------------
+
+class TestWorkspaceIsAbsolute:
+    """
+    Regression: `prepare_workspace` used to return the raw
+    `workspace_root() / change_id`, which is RELATIVE under the default
+    `.interlock_work`. Agents that decide whether to join a handed-over path
+    against their own `repo_path` test `is_absolute()`, so a relative workspace
+    produced `<workspace>/account-service/<workspace>/account-service`; the
+    coexistence rehearsal never found the provider and every change came back
+    NOT_PROVEN_SAFE.
+
+    The whole suite stayed green because every test sets INTERLOCK_WORKSPACE to
+    an absolute tmp_path — the bug only appeared with the default. These tests
+    exercise the default explicitly.
+    """
+
+    def test_default_workspace_resolves_to_an_absolute_path(self, tmp_path, monkeypatch):
+        from orchestrator.real_workflow import prepare_workspace
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "components" / "svc").mkdir(parents=True)
+        monkeypatch.delenv("INTERLOCK_WORKSPACE", raising=False)
+
+        workspace = prepare_workspace("change-1", "components")
+        assert workspace.is_absolute(), "agents branch on is_absolute()"
+
+    def test_explicit_relative_workspace_is_still_absolute(self, tmp_path, monkeypatch):
+        from orchestrator.real_workflow import prepare_workspace
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "components" / "svc").mkdir(parents=True)
+        monkeypatch.setenv("INTERLOCK_WORKSPACE", "relative_work")
+
+        assert prepare_workspace("change-2", "components").is_absolute()
+
+    def test_provider_path_handed_to_agents_is_absolute(self, tmp_path, monkeypatch):
+        """
+        The concrete contract: what the orchestrator puts in the agent context
+        must not need joining against repo_path.
+        """
+        from orchestrator.real_workflow import _build_context, prepare_workspace
+        from orchestrator.agent_registry import COEXISTENCE_REHEARSAL
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("INTERLOCK_WORKSPACE", raising=False)
+        (tmp_path / "components" / "account-service").mkdir(parents=True)
+
+        conn = ledger.init_db(":memory:")
+        ledger.create_change(conn, "c1", "x")
+        spec = {**FIELD_RENAME_SPEC, "components_root": "components"}
+        ledger.set_change_spec(conn, "c1", "field_rename", spec)
+        spec_row = ledger.get_change_spec(conn, "c1")
+
+        workspace = prepare_workspace("c1", "components")
+        ctx = _build_context(conn, "c1", spec_row, COEXISTENCE_REHEARSAL, workspace)
+
+        assert Path(ctx["data"]["provider_path"]).is_absolute()
+        assert Path(ctx["repo_path"]).is_absolute()
+        conn.close()

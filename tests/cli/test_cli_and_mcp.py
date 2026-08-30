@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import orchestrator.gate as gate
 import orchestrator.ledger as ledger
 from interlock_cli import core
 from interlock_cli.cli import app
@@ -125,6 +126,9 @@ class TestGateExitCodes:
         ledger.add_dependency(conn, "c1", "account-service", "checkout", "api", None)
         ledger.upsert_work_item(conn, "c1", "checkout", "verified", "migrate")
         ledger.upsert_work_item(conn, "c1", "account-service", "verified", "provider_patch")
+        ledger.upsert_work_item(
+            conn, "c1", "account-service", "verified", gate.REHEARSAL_STEP_KIND
+        )
         conn.close()
 
         assert runner.invoke(app, ["gate", "c1", "--db", db]).exit_code == core.EXIT_OK

@@ -30,6 +30,30 @@ from pathlib import Path
 from typing import Any
 
 
+class ImplementationFailed(ValueError):
+    """
+    An implementation agent reported failure, carrying its own reason.
+
+    Subclasses ValueError so existing `except ValueError` handlers still catch
+    it, while callers that know about it can recover the agent's evidence
+    instead of only the message.
+    """
+
+    def __init__(self, message: str, evidence: list[dict[str, Any]] | None = None):
+        super().__init__(message)
+        self.evidence = evidence or []
+
+
+def _first_detail(raw: dict[str, Any]) -> str | None:
+    """The most specific explanation the agent produced, if any."""
+    for item in raw.get("evidence", []):
+        content = item.get("content") or {}
+        detail = content.get("detail") or content.get("error")
+        if detail:
+            return str(detail)
+    return None
+
+
 def discovery(raw: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
     """
     Discovery agents already emit DiscoveryResult's shape.
@@ -88,9 +112,16 @@ def implementation(raw: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
     """
     status = raw.get("status")
     if status != "success":
-        raise ValueError(
-            f"{ctx.get('role', 'implementation agent')} returned status={status!r}; "
-            f"refusing to record it as a successful implementation"
+        # Carry the agent's own explanation, not just the fact of failure. The
+        # agent computed exactly why — "still references 'customer_id' in
+        # worker.py" — and without this the ledger records only that something
+        # returned failed, which is useless to a reader and to narration.
+        reason = raw.get("summary") or _first_detail(raw) or "no reason recorded"
+        raise ImplementationFailed(
+            f"{ctx.get('role', 'implementation agent')} could not verify "
+            f"{ctx.get('component') or raw.get('consumer') or 'the component'}: "
+            f"{reason}",
+            evidence=list(raw.get("evidence", [])),
         )
 
     # provider_patch returns no `consumer` key — only `repository`.

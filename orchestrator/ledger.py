@@ -49,6 +49,13 @@ def init_db(db_path: str = ":memory:") -> sqlite3.Connection:
 
     Pass ``":memory:"`` for an in-memory database (tests / CI).
     """
+    if db_path not in (":memory:", ""):
+        # sqlite3 refuses to create a database in a directory that does not
+        # exist, and the generated MCP configs point the ledger at
+        # `.interlock/interlock.db` before anything has created `.interlock/`.
+        # "unable to open database file" on the first tool call is a terrible
+        # way to learn that, so create the parent here.
+        Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

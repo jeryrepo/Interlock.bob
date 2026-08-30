@@ -255,6 +255,26 @@ class TestConfiguration:
         )
         assert result["status"] == "verified"
 
+    def test_an_absolute_provider_path_is_not_joined_onto_repo_path(
+        self, tmp_path, monkeypatch
+    ):
+        """
+        The orchestrator hands over an absolute path inside its isolated
+        workspace, while repo_path is already the provider directory. Joining
+        unconditionally produced `<ws>/account-service/account-service`, so the
+        rehearsal reported "provider directory not found" on every real run —
+        and because it wrote evidence but no work item, nothing noticed.
+        """
+        provider_dir = tmp_path / "workspace" / "account-service"
+        provider_dir.mkdir(parents=True)
+        _install(monkeypatch)
+
+        result = run(
+            {"change_id": CHANGE_ID, "provider_path": str(provider_dir)},
+            provider_dir,  # repo_path is the provider dir, as in the real run
+        )
+        assert result["status"] == "verified"
+
     def test_each_run_binds_a_fresh_port(self):
         """Parallel rehearsals must not collide on a fixed port."""
         assert coexistence_rehearsal._free_port() != 0

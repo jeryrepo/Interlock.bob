@@ -133,10 +133,12 @@ class AgentRunner:
                     "[%s] attempt %d failed: %s", self.role, attempt, exc
                 )
 
+        # `from last_exc` matters: the caller reads __cause__ to recover the
+        # agent's own explanation rather than this wrapper's summary.
         raise AgentFailure(
             f"Agent '{self.role}' failed after 2 attempts. "
             f"Last error: {last_exc}"
-        )
+        ) from last_exc
 
 
 # ---------------------------------------------------------------------------

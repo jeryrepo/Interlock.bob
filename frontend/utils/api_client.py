@@ -122,10 +122,25 @@ class InterlockClient:
             return False
         return True
 
-    def create_change_request(self, description: str) -> dict:
-        return self._request(
-            "POST", "/change-requests", json={"description": description}
-        )
+    def create_change_request(
+        self, description: str, spec: dict | None = None
+    ) -> dict:
+        """
+        Create a change request.
+
+        `spec` is optional and additive. Without it the orchestrator runs its
+        stub workflow; with it, the real agents for that change kind run. The
+        UI has no opinion about which — it forwards what the user chose and
+        renders whatever comes back.
+        """
+        payload: dict = {"description": description}
+        if spec is not None:
+            payload["spec"] = spec
+        return self._request("POST", "/change-requests", json=payload)
+
+    def get_spec(self, change_id: str) -> dict:
+        """Read back the structured spec, or nulls for a stub-path change."""
+        return self._request("GET", f"/change-requests/{change_id}/spec")
 
     def get_change_request(self, change_id: str) -> dict:
         return self._request("GET", f"/change-requests/{change_id}")

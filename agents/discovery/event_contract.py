@@ -36,6 +36,10 @@ from typing import Any
 
 from orchestrator.schemas import Dependency, DiscoveryResult, Evidence
 
+# One definition of what counts as a component, shared with repo_map.
+# Aliased: the local variable below is also called component_dirs.
+from agents.discovery.repo_map import component_dirs as component_dirs_shared
+
 # The provider that owns the event stream carrying the migrating field
 _PROVIDER = "account-service"
 
@@ -133,10 +137,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     dependencies: list[Dependency] = []
 
     # Walk every component directory (excluding the provider itself)
-    component_dirs = sorted(
-        p for p in fixtures_root.iterdir()
-        if p.is_dir() and p.name != provider
-    )
+    component_dirs = component_dirs_shared(fixtures_root, exclude=provider)
 
     for component_dir in component_dirs:
         component = component_dir.name

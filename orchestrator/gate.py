@@ -75,10 +75,20 @@ _DEFAULT_STEP_KINDS: tuple[str, ...] = ("migrate",)
 # failed: consumers would have been migrated to a field the provider never
 # gained.  Legacy description-only changes resolve to an empty tuple, so their
 # verdicts are unchanged.
+# The coexistence rehearsal proves the property no per-component contract test
+# can: that ONE running provider serves the old and new shapes simultaneously,
+# which is what lets consumers cut over one at a time. It is a provider step
+# because it is the provider that must hold both contracts open.
+#
+# It is required here because the gate counts work items and never reads
+# evidence. The rehearsal previously wrote only evidence, so a rehearsal that
+# failed — or never ran at all — left the gate's verdict completely unchanged.
+REHEARSAL_STEP_KIND = "coexistence_rehearsal"
+
 _REQUIRED_PROVIDER_STEPS: dict[str, tuple[str, ...]] = {
-    "field_rename": ("provider_patch",),
-    "api_contract_change": ("provider_patch",),
-    "transport_migration": ("provider_patch",),
+    "field_rename": ("provider_patch", REHEARSAL_STEP_KIND),
+    "api_contract_change": ("provider_patch", REHEARSAL_STEP_KIND),
+    "transport_migration": ("provider_patch", REHEARSAL_STEP_KIND),
 }
 
 

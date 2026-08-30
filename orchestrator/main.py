@@ -29,6 +29,8 @@ import orchestrator.ledger as ledger
 import orchestrator.state_machine as sm
 from orchestrator.agent_runner import run_workflow
 from orchestrator.schemas import ChangeSpec
+from orchestrator.settings import load as load_settings
+from interlock_mcp.http import build as build_mcp
 from orchestrator.gate import build_graph, evaluate_gate
 
 # ---------------------------------------------------------------------------
@@ -127,10 +129,29 @@ class ApproveRequest(BaseModel):
 _ALLOWED_GATES = {"coordinate", "legacy_removal"}
 
 
+# Read once, at import, and shared by the app and the MCP sub-app. Two separate
+# load() calls would let the two disagree about whether MCP is enabled.
+_SETTINGS = load_settings()
+_MCP_APP, _MCP_LIFESPAN_SRC = build_mcp(_SETTINGS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.conn = ledger.init_db(DB_PATH)
-    yield
+    app.state.settings = _SETTINGS
+    # Observed, not inferred: /health reports what was actually mounted.
+    app.state.mcp_mounted = _MCP_APP is not None
+
+    if _MCP_LIFESPAN_SRC is not None:
+        # Starlette does not propagate lifespan into mounted sub-apps, and the
+        # MCP session manager refuses to start twice, so the parent drives it
+        # exactly once here. Without this every /mcp call fails with
+        # "Task group is not initialized".
+        async with _MCP_LIFESPAN_SRC.router.lifespan_context(_MCP_LIFESPAN_SRC):
+            yield
+    else:
+        yield
+
     app.state.conn.close()
 
 
@@ -427,3 +448,62 @@ def get_change_spec(change_id: str):
     return ChangeSpecResponse(
         change_id=change_id, kind=row["kind"], spec=row["spec"]
     )
+
+
+# ---------------------------------------------------------------------------
+# watsonx Orchestrate external-agent surface (optional, additive)
+# ---------------------------------------------------------------------------
+# Mounted unconditionally so the route always exists and can explain itself;
+# it returns 503 until INTERLOCK_EXTERNAL_AGENT_KEY is set, rather than 404,
+# which makes "not configured" distinguishable from "wrong URL".
+from orchestrator.external_agent import router as _external_agent_router  # noqa: E402
+
+app.include_router(_external_agent_router)
+
+
+class HealthResponse(BaseModel):
+    status: str
+    integrations: dict
+
+
+@app.get("/health", response_model=HealthResponse)
+def health():
+    """
+    Liveness plus a report of which optional integrations are actually wired up.
+
+    Every IBM feature is optional, so "is watsonx connected?" has to be
+    answerable without reading logs or spending model credits.
+    """
+    from orchestrator import watsonx as _watsonx
+
+    settings = app.state.settings
+    return HealthResponse(
+        status="ok",
+        integrations={
+            "watsonx_ai_narration": _watsonx.health(settings.watsonx),
+            "watsonx_orchestrate": {
+                "configured": settings.orchestrate.configured,
+                "external_agent_endpoint": (
+                    "enabled" if settings.orchestrate.external_agent_enabled
+                    else "disabled (set INTERLOCK_EXTERNAL_AGENT_KEY)"
+                ),
+                "mcp_http": (
+                    "mounted at POST /mcp"
+                    if getattr(app.state, "mcp_mounted", False)
+                    else "not mounted (set INTERLOCK_EXTERNAL_AGENT_KEY)"
+                ),
+                "mcp_stdio": "always available via interlock_mcp.server",
+            },
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# MCP over HTTP, for the watsonx Orchestrate toolkit (optional, additive)
+# ---------------------------------------------------------------------------
+# LAST on purpose. Mounting at "" with the full path inside the sub-app makes
+# `POST /mcp` match exactly rather than 307-redirecting, but a "" mount matches
+# every path — so it has to be registered after every real route, and its
+# middleware 404s anything that is not /mcp.
+if _MCP_APP is not None:
+    app.mount("", _MCP_APP)

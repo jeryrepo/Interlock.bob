@@ -14,13 +14,34 @@ Does NOT call other agents.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import Any
 
 from orchestrator.schemas import Dependency, DiscoveryResult, Evidence
 
-# File extension categories
-_SOURCE_EXTS = {".py"}
+# File extension categories.
+#
+# Source is anything a consumer might be written in, not just Python — the
+# language-aware reference finding for the non-Python extensions lives in
+# polyglot_source.py; here they only need to be inventoried and text-scanned
+# so a TypeScript or Java component does not show up as an empty directory.
+_SOURCE_EXTS = {
+    ".py",
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+    ".java", ".kt", ".kts", ".scala", ".cs", ".go", ".rb", ".php",
+}
+
+# Directories that hold other people's code or build output. On a real
+# repository, walking node_modules/ turns "scan this service" into "scan the
+# npm registry" — thousands of files, false field references, and dependency
+# edges pointing at vendored libraries.
+_SKIP_DIRS = {
+    "node_modules", ".git", ".hg", ".svn",
+    ".venv", "venv", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache",
+    "dist", "build", "out", "target", "vendor", "coverage",
+    ".next", ".nuxt", ".gradle", ".idea", ".vs", "bin", "obj",
+}
 _OPENAPI_NAMES = {"openapi.yaml", "openapi.yml", "swagger.yaml", "swagger.yml"}
 _SCHEMA_EXTS = {".sql"}
 _SCHEMA_NAME_PATTERNS = ("schema", "migration", "migrate", "alembic", "versions")
@@ -82,12 +103,45 @@ def _find_field_refs_in_python(source: str, field: str) -> list[int]:
     return sorted(set(lines))
 
 
+def component_dirs(root: Path, exclude: str | None = None) -> list[Path]:
+    """
+    The immediate subdirectories of *root* that are components.
+
+    Interlock's structural assumption lives here, in one place, so every
+    scanner agrees about what a component is. Build output, dependency caches
+    and VCS metadata are not components: enumerating them made a real
+    repository slow to scan and, worse, turned each one into a candidate
+    consumer that the gate would then require to be migrated - with no way to
+    exclude it, because there is no ignore file.
+
+    Dotted directories are excluded for the same reason. `.github` holding a
+    workflow that mentions the symbol is not a service that breaks.
+    """
+    return sorted(
+        d for d in root.iterdir()
+        if d.is_dir()
+        and d.name not in _SKIP_DIRS
+        and not d.name.startswith(".")
+        and d.name != exclude
+    )
+
+
 def _find_field_refs_in_text(text: str, field: str) -> list[int]:
-    """Return 1-based line numbers where `field` appears in plain text."""
+    """
+    Return 1-based line numbers where `field` appears as a standalone symbol.
+
+    Word-bounded, not a substring test: a plain `in` check counted
+    `customer_id_extra` as a reference to `customer_id`, which manufactured
+    dependency edges — and therefore gate requirements — out of unrelated
+    identifiers.
+    """
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_])" + re.escape(field) + r"(?![A-Za-z0-9_])"
+    )
     return [
         i + 1
         for i, line in enumerate(text.splitlines())
-        if field in line
+        if pattern.search(line)
     ]
 
 
@@ -117,6 +171,8 @@ def _scan_component(
     for path in sorted(component_dir.rglob("*")):
         if not path.is_file():
             continue
+        if _SKIP_DIRS.intersection(path.relative_to(component_dir).parts[:-1]):
+            continue
 
         rel = path.relative_to(fixtures_root).as_posix()
 
@@ -126,7 +182,7 @@ def _scan_component(
         elif _is_schema_file(path):
             schema_files.append(rel)
 
-        if path.suffix == ".py":
+        if path.suffix in _SOURCE_EXTS:
             source_files.append(rel)
             if _is_event_file(path):
                 event_files.append(rel)
@@ -176,6 +232,17 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     # The provider comes from the change spec.  The literal default keeps
     # legacy callers working; it is not a claim about which components exist.
     provider: str = data.get("provider", "account-service")
+    # Also match the replacement symbol.
+    #
+    # Searching only for the old symbol assumes discovery runs BEFORE the
+    # migration. In external mode the work has already been done by a human or
+    # another agent, so a migrated consumer no longer mentions the old symbol at
+    # all — and searching for it alone found nothing, leaving the dependency
+    # graph empty and the change unable to leave DISCOVERY.
+    #
+    # A component that references either symbol is a consumer of this contract,
+    # whichever side of the migration it currently sits on.
+    new_field: str = data.get("new_field") or ""
 
     # Resolve fixtures_root
     if "fixtures_root" in data:
@@ -188,12 +255,17 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     dependencies: list[Dependency] = []
 
     # Walk each immediate subdirectory as a component
-    component_dirs = sorted(
-        p for p in fixtures_root.iterdir() if p.is_dir()
-    )
+    components = component_dirs(fixtures_root)
 
-    for component_dir in component_dirs:
+    for component_dir in components:
         summary = _scan_component(component_dir, fixtures_root, old_field)
+        if new_field and new_field != old_field:
+            extra = _scan_component(component_dir, fixtures_root, new_field)
+            seen = {(r["file"], r["line"]) for r in summary["field_refs"]}
+            summary["field_refs"] = summary["field_refs"] + [
+                r for r in extra["field_refs"]
+                if (r["file"], r["line"]) not in seen
+            ]
         name = summary["name"]
 
         # Choose a representative source_ref for this component:
@@ -236,7 +308,9 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
                     edge_type="undocumented",
                     reason=(
                         f"Source inspection found {len(summary['field_refs'])} "
-                        f"reference(s) to '{old_field}' in {name}"
+                        f"reference(s) to '{old_field}'"
+                        + (f" or '{new_field}'" if new_field and new_field != old_field else "")
+                        + f" in {name}"
                     ),
                 )
             )

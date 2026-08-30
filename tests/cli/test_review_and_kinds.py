@@ -142,7 +142,7 @@ class TestOrchestrationMap:
         payload = json.loads(runner.invoke(app, ["agents", "--json"]).stdout)
         req = payload["transport_migration"]["gate_requires"]
         assert req["per_consumer"] == ["subscribe", "webhook_quiet"]
-        assert req["provider"] == ["provider_patch"]
+        assert req["provider"] == ["provider_patch", "coexistence_rehearsal"]
 
     def test_every_required_step_has_an_agent_that_proves_it(self):
         """
@@ -203,10 +203,29 @@ class TestTransportMigration:
         "--components-root", "fixtures_transport",
     ]
 
-    def test_reaches_verified(self, db):
+    def test_blocks_because_the_provider_side_is_not_automatable(self, db):
+        """
+        A transport cut-over must NOT reach VERIFIED today, and this test exists
+        to keep it that way until the provider side genuinely works.
+
+        This previously asserted VERIFIED. It passed for the wrong reason: the
+        provider-patch agent matches field-shaped symbols (class annotations,
+        dict keys, assignments), and `deliver_via_webhook` is a function name,
+        so none of its patterns matched. It changed nothing, committed nothing
+        of substance, and reported success anyway — leaving `event-publisher`
+        without `deliver_via_pubsub` while the gate said the migration was safe.
+
+        Synthesising a real pub/sub implementation is beyond a deterministic
+        agent, so the honest outcome is NOT_PROVEN_SAFE naming the provider
+        steps that were never proved. Subscribers still migrate correctly; it is
+        only the provider that cannot be automated.
+        """
         result = runner.invoke(app, [*self.ARGS, "--db", db, "--json"])
-        assert result.exit_code == core.EXIT_OK, result.stdout
-        assert json.loads(result.stdout)["gate"]["result"] == "VERIFIED"
+        assert result.exit_code == core.EXIT_NOT_PROVEN_SAFE, result.stdout
+
+        gate_payload = json.loads(result.stdout)["gate"]
+        assert gate_payload["result"] == "NOT_PROVEN_SAFE"
+        assert "event-publisher:provider_patch" in gate_payload["unresolved"]
 
     def test_both_steps_are_proved_for_every_subscriber(self, db):
         result = runner.invoke(app, [*self.ARGS, "--db", db, "--json"])

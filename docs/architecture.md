@@ -108,16 +108,69 @@ source. Hardcoding it anywhere destroys the demonstration, which is why
 
 ## Current state — read this before trusting a demo
 
-**`orchestrator/agent_runner.py` sets `STUB_MODE = True`.** The real agents in
-`agents/` are implemented and independently tested, but none of them is wired
-into the pipeline — nothing in `orchestrator/` imports `agents/`. `run_workflow()`
-executes hardcoded stub functions that return canned demo data, including
-placeholder commit SHAs.
+The real agents in `agents/` are wired in and run. Which agents execute is
+selected per change by the presence of a `change_spec` row, not by a global
+flag: a change **with** a spec runs the real agents via
+`orchestrator/real_workflow.py`; a change **without** one falls back to the stub
+workflow in `agent_runner.py` while `STUB_MODE` is True. All ten runtime agents
+are written, `contract-test` and `coexistence-rehearsal` included.
 
-Everything above describes the architecture accurately. What a running instance
-currently *shows* is seeded, not discovered. Two of the ten runtime agents —
-`contract-test` and `coexistence-rehearsal` — are unwritten, and `docker-compose.yml`
-is empty.
+What is genuinely proved, per change kind:
 
-Closing that gap is Phase 1 of the current plan: an adapter layer plus an agent
-registry, then deleting the stubs outright rather than leaving them switchable.
+| Kind | Verdict on the bundled fixtures | Why |
+| --- | --- | --- |
+| `field_rename` | VERIFIED | Provider patched, all four consumers migrated (including the SQL schema), coexistence rehearsed against a real running provider. |
+| `api_contract_change` | VERIFIED | Same path as `field_rename`. |
+| `transport_migration` | **NOT_PROVEN_SAFE** | Subscribers migrate correctly, but the provider side is not automatable — see below. |
+
+### The transport migration does not reach VERIFIED, deliberately
+
+`provider-patch` matches *field-shaped* symbols: class annotations, dict-literal
+keys, assignments, OpenAPI properties. A webhook → pub/sub cut-over renames a
+*function*, which matches none of those patterns. Synthesising a real pub/sub
+implementation is beyond a deterministic agent.
+
+The agent therefore reports `status="failed"` and the gate blocks, naming
+`event-publisher:provider_patch` as unproved. This is the intended outcome. It
+previously reported success while changing nothing, so the gate declared a
+migration safe that had never happened — the exact failure mode this project
+exists to prevent. Completing this path needs either a human-written provider
+patch or an LLM-backed implementation agent.
+
+### Non-Python consumers are discovered, and block honestly
+
+Discovery is no longer Python-only. `polyglot-source-discovery` finds consumers
+written in JavaScript/TypeScript, Java, Kotlin, Go, C#, Ruby and PHP by lexical
+scanning: the quoted wire name (`"customer_id"` — annotations, struct tags,
+string keys) is matched everywhere, and naming-convention variants
+(`customerId`, `CustomerId`) are matched in the languages whose style renames
+fields at the mapping layer. Convention matches are recorded as `hypothesis`
+rather than `confirmed` — an inference a human can refute — but they still emit
+a dependency edge, because the gate must know about a *probable* consumer.
+Vendored and generated trees (`node_modules/`, `target/`, `dist/`, minified
+bundles) are never scanned.
+
+The consequence is deliberately asymmetric: a TypeScript consumer is
+*discovered* and therefore *required*, but the built-in implementation agent
+migrates only Python and SQL — so it reports failure for that component and the
+gate blocks, naming it. Before this agent existed the same repository produced
+VERIFIED with the TypeScript consumer silently unmigrated. Being told what
+still needs a human (or an external agent, via `interlock.toml` /
+external-change mode) is the honest verdict; the false VERIFIED was the bug.
+
+### The invariant that holds all of this up
+
+An implementation agent that changed no non-test source file **must not** report
+success. `status` used to be set purely from "pytest passed", decoupled from
+whether the agent had changed anything, which is what allowed a schema-only
+component to be reported migrated while its `schema.sql` was untouched. See
+`tests/implementation/test_no_silent_success.py`.
+
+Correspondingly, the gate counts **work items** and never reads evidence, so any
+agent whose result must affect the verdict has to write one. The coexistence
+rehearsal is a required provider step (`gate.REHEARSAL_STEP_KIND`) for this
+reason; it previously wrote evidence alone and could fail with no effect on the
+verdict at all.
+
+`docker-compose.yml` is retained as an optional demo path only — the rehearsal
+drives a uvicorn subprocess instead, so it can run without a Docker daemon.

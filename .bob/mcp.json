@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "interlock": {
-      "command": "python",
+      "command": ".venv\\Scripts\\python.exe",
       "args": ["-m", "interlock_mcp.server"],
       "cwd": ".",
       "env": {

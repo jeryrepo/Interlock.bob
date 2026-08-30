@@ -76,6 +76,12 @@ Routing is per change, on whether it carries a structured `ChangeSpec`:
 | has a `change_spec` row | `real_workflow.py` — the real agents |
 | description only | the legacy stub workflow in `agent_runner.py` |
 
+The Streamlit UI sends a spec by default (the **Run real agents** toggle in the
+sidebar), so the panels show discovered dependencies and real commit SHAs. Turn
+the toggle off to exercise the stub path. Until 2026-08-29 the UI sent only a
+description, which meant every demo rendered seeded data while looking exactly
+like a real run — `tests/frontend/test_spec.py` pins that shut.
+
 `STUB_MODE` no longer means "stubs everywhere". It controls only whether the
 stub fallback is available for description-only changes.
 
@@ -181,7 +187,13 @@ change is additive and you say so explicitly:
 
 ## Frontend rules
 
-`frontend/` is a **pure view over the API**. It must not:
+`frontend/` is a **pure view over the API**. It builds the `ChangeSpec` payload
+in `utils/spec.py` — shape only, since the backend owns validation — and must
+not duplicate that validation or the two will drift. Pure helpers live in
+`utils/` rather than in `streamlit_app.py`, because a Streamlit module executes
+top to bottom on import and nothing defined inside it can be unit-tested.
+
+It must not:
 
 - open SQLite,
 - run an LLM,
@@ -193,8 +205,9 @@ change is additive and you say so explicitly:
 It consumes these endpoints only:
 
 ```
-POST /change-requests
+POST /change-requests            (description, plus an optional spec)
 GET  /change-requests/{id}
+GET  /change-requests/{id}/spec
 GET  /change-requests/{id}/evidence
 GET  /change-requests/{id}/graph
 GET  /change-requests/{id}/gate
