@@ -253,12 +253,21 @@ def discover(
     as_json: bool = _JSON,
 ) -> None:
     """
-    Show what Interlock sees in a repository. Reads only; changes nothing.
+    Preview one candidate change: trace --old through --provider's consumers, the way `check` would, without running anything.
 
-    Run this FIRST against an unfamiliar codebase. `check` answers "is this
-    change safe"; `discover` answers the question that comes before it - does
-    Interlock understand the shape of this repository at all. A components root
-    pointed one level too high is invisible in a verdict and obvious here.
+    `discover` takes the SAME --old/--provider as `check` because it is not a
+    general repository browser - it is a dry run of one specific change. There
+    is no way to "just explore" without naming a symbol and the component that
+    owns it: those two are exactly what Interlock traces. If you don't know a
+    real symbol or component name yet, run `interlock manifest` first to see
+    what components this repository even has, then come back here with one.
+
+    Run this FIRST against an unfamiliar codebase, once you have picked a
+    symbol. `check` answers "is this change safe"; `discover` answers the
+    question that comes before it - does Interlock see this symbol flowing
+    to the consumers you expect at all. A components root pointed one level
+    too high, or a provider name that is a typo, is invisible in a verdict
+    and obvious here.
 
     No workspace copy, no git, no ledger, no approval, nothing written.
     """
@@ -720,15 +729,24 @@ def check(
 
 @app.command()
 def start(
-    old: str = typer.Option(..., "--old"),
-    new: str = typer.Option(..., "--new"),
-    provider: str = typer.Option(..., "--provider"),
-    kind: str = typer.Option("field_rename", "--kind"),
+    old: str = typer.Option(..., "--old", help="Symbol being replaced."),
+    new: str = typer.Option(..., "--new", help="Replacement symbol."),
+    provider: str = typer.Option(..., "--provider", help="Component that owns the change."),
+    kind: str = typer.Option("field_rename", "--kind", help="field_rename | api_contract_change | transport_migration"),
     components_root: str = _ROOT,
     db: str = _DB,
     as_json: bool = _JSON,
 ) -> None:
-    """Create a change and run agents up to the coordination gate."""
+    """
+    Create a change and run agents up to the coordination gate, then stop for a human instead of exiting non-zero.
+
+    Same inputs and agents as `check`; the difference is what happens at the
+    coordination gate. `check` auto-approves it (there is no human at a
+    terminal in CI) and exits non-zero on failure. `start` leaves the change
+    waiting in `awaiting_approval` state for a person to call `approve`
+    on - use it when you want a checkpoint before anything proceeds, e.g. in
+    an interactive workflow rather than a pipeline.
+    """
     spec = core.build_spec(kind, provider, old, new, components_root)
     _check_provider(provider, components_root, as_json)
 
@@ -770,11 +788,11 @@ def approve(
 
 @app.command()
 def gate(
-    change_id: str = typer.Argument(...),
+    change_id: str = typer.Argument(..., help="Change id, printed by `check` or `start`, or from `interlock list`."),
     db: str = _DB,
     as_json: bool = _JSON,
 ) -> None:
-    """Print the deterministic verdict. Exits non-zero if not VERIFIED."""
+    """Print the deterministic verdict for a change, by id. Exits non-zero if not VERIFIED."""
     conn = core.open_ledger(db)
     g = core.gate_status(conn, change_id)
     _echo(g, as_json, _print_gate)
@@ -784,11 +802,11 @@ def gate(
 
 @app.command()
 def status(
-    change_id: str = typer.Argument(...),
+    change_id: str = typer.Argument(..., help="Change id, printed by `check` or `start`, or from `interlock list`."),
     db: str = _DB,
     as_json: bool = _JSON,
 ) -> None:
-    """Show a change's current state and gate verdict."""
+    """Show a change's current state and gate verdict, by id."""
     conn = core.open_ledger(db)
     try:
         result = core.status(conn, change_id)
@@ -815,12 +833,12 @@ def list_changes(db: str = _DB, as_json: bool = _JSON) -> None:
 
 @app.command()
 def evidence(
-    change_id: str = typer.Argument(...),
+    change_id: str = typer.Argument(..., help="Change id, printed by `check` or `start`, or from `interlock list`."),
     claim_type: Optional[str] = typer.Option(None, "--type", help="Filter by claim type."),
     db: str = _DB,
     as_json: bool = _JSON,
 ) -> None:
-    """Show the evidence ledger for a change."""
+    """Show the evidence ledger for a change: every claim an agent recorded, and why."""
     conn = core.open_ledger(db)
     items = core.evidence(conn, change_id)
     if claim_type:
@@ -835,16 +853,22 @@ def evidence(
 def review(
     change_id: Optional[str] = typer.Argument(None, help="Change id. Omitted with --run to create one."),
     run: bool = typer.Option(False, "--run", help="Run the change first, then render."),
-    old: Optional[str] = typer.Option(None, "--old"),
-    new: Optional[str] = typer.Option(None, "--new"),
-    provider: Optional[str] = typer.Option(None, "--provider"),
-    kind: str = typer.Option("field_rename", "--kind"),
+    old: Optional[str] = typer.Option(None, "--old", help="Symbol being replaced. Required with --run."),
+    new: Optional[str] = typer.Option(None, "--new", help="Replacement symbol. Required with --run."),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Component that owns the change. Required with --run."),
+    kind: str = typer.Option("field_rename", "--kind", help="field_rename | api_contract_change | transport_migration"),
     components_root: str = _ROOT,
     fmt: str = typer.Option("markdown", "--format", help="markdown | summary | json"),
     db: str = _DB,
 ) -> None:
     """
     Render a pull-request review for a change.
+
+    Two ways to use it: pass an existing CHANGE_ID (from `check`, `start` or
+    `interlock list`) to render a change that already ran, or pass --run with
+    --old/--new/--provider to run `check` and render its result in one step -
+    --old/--new/--provider only matter in that second mode, which is why they
+    are optional here but required together.
 
     This is what the GitHub Action posts. Run it locally before opening a PR to
     see exactly what reviewers will see. Exits non-zero when the verdict is
