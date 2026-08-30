@@ -24,6 +24,10 @@ from typing import Any
 
 from orchestrator.schemas import Dependency, DiscoveryResult, Evidence
 
+# One definition of what counts as a component, shared with repo_map.
+# Aliased: the local variable below is also called component_dirs.
+from agents.discovery.repo_map import component_dirs as component_dirs_shared
+
 # The provider that owns the field being migrated
 _PROVIDER = "account-service"
 
@@ -86,6 +90,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     Returns a dict that validates as DiscoveryResult.
     """
     change_id: str = data["change_id"]
+    provider: str = data.get("provider", _PROVIDER)
     old_field: str = data.get("old_field", "customer_id")
 
     if "fixtures_root" in data:
@@ -97,9 +102,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     dependencies: list[Dependency] = []
 
     # Walk every component directory
-    component_dirs = sorted(
-        p for p in fixtures_root.iterdir() if p.is_dir()
-    )
+    component_dirs = component_dirs_shared(fixtures_root)
 
     for component_dir in component_dirs:
         component = component_dir.name
@@ -142,7 +145,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
                 subject=component,
                 content={
                     "component": component,
-                    "provider": _PROVIDER,
+                    "provider": provider,
                     "field": old_field,
                     "schema_files": [
                         p.relative_to(fixtures_root).as_posix()
@@ -161,8 +164,8 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
         dependencies.append(
             Dependency(
-                from_component=component,
-                to_component=_PROVIDER,
+                from_component=provider,
+                to_component=component,
                 edge_type="db",
                 reason=(
                     f"Schema file references '{old_field}' at {source_ref}"

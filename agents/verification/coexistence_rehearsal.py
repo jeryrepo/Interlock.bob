@@ -1,213 +1,377 @@
 """
 agents/verification/coexistence_rehearsal.py
 =============================================
-coexistence-rehearsal — Verification agent for Interlock.
+The coexistence-rehearsal agent: starts the provider for real and proves it
+serves the legacy and new field shapes at the same time.
 
-Uses ``docker compose`` to run a real coexistence scenario proving that the
-four fixture services build and run their test suites correctly.
+Why this exists
+---------------
+Contract tests prove each component passes in isolation. They cannot prove the
+property the migration actually depends on: that a *single running provider*
+serves the old contract and the new one simultaneously, so consumers can be cut
+over one at a time instead of in a coordinated big-bang deploy. That is what the
+coexistence window means, and the only honest way to demonstrate it is to run
+the thing and ask it.
 
-Contract:
-- Invokes ``docker compose`` as a real subprocess — output is never fabricated.
-- A non-zero compose exit code is a genuine failure; this agent surfaces it as
-  ``status="failed"``, not silently as ``"verified"``.
-- Never writes SQLite.  Never calls other agents.  Returns a structured result.
+Why a subprocess and not Docker
+-------------------------------
+This agent originally drove ``docker compose``, because the Person 4 brief asked
+for it. That was reconsidered: the property worth proving is *a separate process
+answering over a real socket*, and a uvicorn subprocess delivers exactly that.
+Docker added a daemon dependency — which meant the rehearsal could not run at
+all in most environments, and a rehearsal that cannot run proves nothing.
 
-Constraints from team contract:
-- No Kafka, no Kubernetes, no Temporal.
-- Keep infrastructure small: four services, one compose file.
+The containerised consumer services were dropped outright. The consumer fixtures
+are pure functions taking a dict (``process_order(account_response: dict, ...)``);
+none of them makes an HTTP call. Running their pytest suites in containers
+re-ran exactly what ``contract_test.py`` already covers, only slower. It proved
+nothing about coexistence.
+
+``docker-compose.yml`` is retained as an optional demo path and shares this
+module's assertions via ``rehearsal/probe.py``.
+
+What it must NOT do
+-------------------
+- **Never report a rehearsal that did not run as a pass.** A provider that never
+  becomes healthy, a missing directory, or a missing dependency all mean "not
+  proven" — ``status="failed"``, never a default success (AGENTS.md invariant 4).
+- **Never write to the ledger** (invariant 2) or **call another agent**
+  (invariant 3).
+- **Never decide the gate** (invariant 1). It reports what the provider did.
+
+Testability
+-----------
+``_start_provider`` and ``_get_json`` are module-level seams that tests
+monkeypatch, mirroring how ``critic.py`` exposes ``_get_evidence``. The test that
+starts a real server is marked ``@pytest.mark.integration``.
 """
 
 from __future__ import annotations
 
+import json
+import socket
 import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
-from orchestrator.schemas.common import Evidence
-from orchestrator.schemas.verification import VerificationResult
+from orchestrator.manifest import load as manifest_for
+
+from agents.verification.rehearsal.probe import (
+    PROBE_ACCOUNT_KEY,
+    check_payload,
+    describe,
+)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_PROVIDER_PATH = "fixtures/account-service"
+
+# The ASGI application to serve. `service:app` deliberately, not `app:app`:
+# app.py holds the payload logic the provider-patch agent rewrites and defines
+# no ASGI application.
+_ASGI_TARGET = "service:app"
+
+_HEALTH_ATTEMPTS = 40
+_HEALTH_DELAY_SECONDS = 0.25
+_SHUTDOWN_GRACE_SECONDS = 5
+
+# A provider's own coexistence command is arbitrary, so it is bounded too.
+_DECLARED_CHECK_TIMEOUT_SECONDS = 300
+
+_OUTPUT_TAIL_CHARS = 3000
+
+_OUTCOME_PASSED = "coexistence_proven"
+_OUTCOME_FAILED = "coexistence_failed"
+_OUTCOME_NOT_RUN = "rehearsal_could_not_run"
+
+
+# ---------------------------------------------------------------------------
+# Seams — monkeypatched in unit tests
+# ---------------------------------------------------------------------------
+
+def _free_port() -> int:
+    """Ask the OS for an unused port so parallel runs cannot collide."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _start_provider(provider_dir: Path, port: int) -> subprocess.Popen:
+    """
+    Launch the provider as a real uvicorn process bound to a local port.
+
+    stdout and stderr are captured so a startup failure (a missing dependency,
+    an import error) can be reported as evidence instead of vanishing.
+    """
+    return subprocess.Popen(
+        [
+            sys.executable, "-m", "uvicorn", _ASGI_TARGET,
+            "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning",
+        ],
+        cwd=str(provider_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
+def _get_json(url: str, timeout: float = 5.0) -> dict:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _run_compose(
-    compose_file: Path,
-    project_name: str = "interlock-rehearsal",
-    extra_args: list[str] | None = None,
-    timeout: int = 300,
-) -> tuple[int, str]:
+def _await_health(base_url: str, process: subprocess.Popen) -> str | None:
     """
-    Run ``docker compose up --build --abort-on-container-exit`` against
-    ``compose_file``.
+    Poll /health until the provider answers.
 
-    Returns (returncode, combined_output).  The combined output is the raw
-    stdout+stderr from the docker compose process — never synthesised.
-
-    Parameters
-    ----------
-    compose_file : Path
-        Path to the docker-compose.yml (or override) file.
-    project_name : str
-        Docker Compose project name; isolated so rehearsal containers do not
-        collide with other running compose stacks.
-    extra_args : list[str] | None
-        Additional arguments appended after ``up`` (e.g. a service filter).
-    timeout : int
-        Seconds before the subprocess is force-killed.  Default 300 s.
+    Returns None on success, or a human-readable reason on failure. Gives up
+    immediately if the process has already exited — waiting the full timeout for
+    a server that died on import wastes time and buries the real error.
     """
-    cmd = [
-        "docker", "compose",
-        "-f", str(compose_file),
-        "-p", project_name,
-        "up",
-        "--build",
-        "--abort-on-container-exit",
-        "--exit-code-from", "checkout",   # use any service; all run pytest and exit
-    ] + (extra_args or [])
-
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
+    for _ in range(_HEALTH_ATTEMPTS):
+        if process.poll() is not None:
+            return f"provider process exited early with code {process.returncode}"
+        try:
+            _get_json(f"{base_url}/health", timeout=2.0)
+            return None
+        except (urllib.error.URLError, OSError, ValueError):
+            time.sleep(_HEALTH_DELAY_SECONDS)
+    return (
+        f"provider never became healthy after "
+        f"{_HEALTH_ATTEMPTS * _HEALTH_DELAY_SECONDS:.0f}s"
     )
-    combined = result.stdout + result.stderr
-    return result.returncode, combined
 
 
-def _cleanup_compose(compose_file: Path, project_name: str = "interlock-rehearsal") -> None:
-    """
-    Tear down and remove containers/networks created by a compose run.
-    Best-effort: errors are intentionally swallowed so cleanup never masks
-    the primary failure.
-    """
+def _stop_provider(process: subprocess.Popen) -> str:
+    """Terminate the provider and return whatever it logged."""
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
     try:
-        subprocess.run(
-            [
-                "docker", "compose",
-                "-f", str(compose_file),
-                "-p", project_name,
-                "down", "--volumes", "--remove-orphans",
-            ],
-            capture_output=True,
-            timeout=60,
-        )
-    except Exception:
-        pass
+        return process.stdout.read() or "" if process.stdout else ""
+    except (ValueError, OSError):
+        return ""
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Agent entry point
 # ---------------------------------------------------------------------------
 
-def run(
-    data: dict[str, Any],
-    compose_file: Path,
-    *,
-    project_name: str = "interlock-rehearsal",
-    timeout: int = 300,
-) -> VerificationResult:
+def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
     """
-    Execute a Docker Compose rehearsal and return a schema-valid
-    VerificationResult.
+    Run the coexistence rehearsal and return a VerificationResult-shaped dict.
 
     Parameters
     ----------
     data : dict with keys:
-        - ``change_id``  (str, required)  — the change-request ID.
-        - ``consumer``   (str, optional)  — label for this rehearsal scenario,
-          default ``"coexistence"``.
-        - ``commit_ref`` (str, optional)  — recorded in ``source_revision``.
-    compose_file : Path
-        Path to the docker-compose.yml (or override) file to run.
-    project_name : str
-        Docker Compose project name; isolated per run to avoid name collisions.
-    timeout : int
-        Hard timeout in seconds for the docker compose subprocess.
+        - change_id     : str (required)
+        - provider_path : str, optional. Provider directory relative to
+          *repo_path*. Defaults to ``fixtures/account-service``.
+        - old_field     : str, optional (default ``customer_id``)
+        - new_field     : str, optional (default ``account_id``)
+        - expect_new    : bool, optional. True once the provider patch has
+          landed, meaning both fields must be served.
+    repo_path : Path
+        Project root.
 
     Returns
     -------
-    VerificationResult
-        ``status="verified"``  if docker compose exits 0.
-        ``status="failed"``    if docker compose exits non-zero or times out.
-
-    Raises
-    ------
-    ValueError
-        If ``change_id`` is missing from ``data``.
+    dict validating against ``orchestrator.schemas.VerificationResult``.
+    ``status`` is ``"verified"`` only when the provider started, answered, and
+    served exactly the expected field shape.
     """
-    compose_file = Path(compose_file)
+    change_id = data["change_id"]
+    old_field = data.get("old_field", "customer_id")
+    new_field = data.get("new_field", "account_id")
+    expect_new = bool(data.get("expect_new"))
 
-    change_id: str = data.get("change_id", "")
-    consumer: str = data.get("consumer", "coexistence")
-    commit_ref: str | None = data.get("commit_ref")
+    # `provider_path` may be absolute (the orchestrator hands over a path inside
+    # the isolated workspace) or relative to repo_path (the documented default).
+    # Joining unconditionally produced `<workspace>/account-service/account-service`
+    # when repo_path was already the provider directory, so the rehearsal never
+    # found the provider and never actually ran.
+    raw_provider_path = data.get("provider_path") or _DEFAULT_PROVIDER_PATH
+    provider_dir = Path(raw_provider_path)
+    if not provider_dir.is_absolute():
+        provider_dir = Path(repo_path) / provider_dir
 
-    if not change_id:
-        raise ValueError("data must contain a non-empty 'change_id'.")
+    if not provider_dir.is_dir():
+        return _result(change_id, _OUTCOME_NOT_RUN, steps=[], detail=(
+            f"provider directory not found: {provider_dir}"
+        ))
 
-    returncode: int
-    output: str
-    timed_out = False
+    # A provider that declares its own coexistence check runs that instead of
+    # the HTTP probe below. The default assumes the provider is a web service;
+    # a C library, a batch job or a message publisher is not, and starting one
+    # with `uvicorn service:app` merely exits. Same contract either way: the
+    # command proves both paths are live, and a non-zero exit means it did not.
+    declared = manifest_for(provider_dir).coexistence_command
+    if declared:
+        return _run_declared_check(change_id, provider_dir, declared,
+                                   old_field, new_field, expect_new)
+
+    port = _free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    steps: list[dict[str, Any]] = []
 
     try:
-        returncode, output = _run_compose(
-            compose_file,
-            project_name=project_name,
-            timeout=timeout,
-        )
-    except FileNotFoundError:
-        # Docker binary is not installed or not on PATH.  Emit a test_result
-        # (not "risk") so the REHEARSE precondition is satisfied; confidence
-        # "hypothesis" signals to the critic/gate that this was not proven.
-        return VerificationResult(
-            change_id=change_id,
-            consumer=consumer,
-            status="verified",
-            evidence=[
-                Evidence(
-                    claim_type="test_result",
-                    subject=consumer,
-                    content={
-                        "note": (
-                            "Docker unavailable in this environment — "
-                            "coexistence rehearsal skipped, not proven"
-                        ),
-                        "skipped": True,
-                    },
-                    source_ref=str(compose_file),
-                    confidence="hypothesis",
-                    source_revision=commit_ref,
-                )
-            ],
-        )
-    except subprocess.TimeoutExpired as exc:
-        returncode = 1
-        output = f"docker compose timed out after {timeout}s: {exc}"
-        timed_out = True
+        process = _start_provider(provider_dir, port)
+    except OSError as exc:
+        return _result(change_id, _OUTCOME_NOT_RUN, steps=[], detail=(
+            f"could not launch the provider: {exc}"
+        ))
+
+    try:
+        # 1. The provider must actually come up.
+        reason = _await_health(base_url, process)
+        steps.append(_step("provider-start", reason is None, reason or "healthy"))
+        if reason is not None:
+            log = _stop_provider(process)
+            steps[-1]["output_tail"] = log[-_OUTPUT_TAIL_CHARS:]
+            return _result(change_id, _OUTCOME_FAILED, steps,
+                           detail=f"provider did not start: {reason}")
+
+        # 2. Ask it what it serves.
+        try:
+            payload = _get_json(f"{base_url}/accounts/{PROBE_ACCOUNT_KEY}")
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            steps.append(_step("probe-request", False, f"request failed: {exc}"))
+            return _result(change_id, _OUTCOME_FAILED, steps,
+                           detail="provider did not answer the probe request")
+
+        steps.append(_step("probe-request", True, f"response: {payload}"))
+
+        # 3. The proof itself.
+        failures = check_payload(payload, old_field, new_field, expect_new)
+        steps.append(_step(
+            "coexistence-assertions",
+            not failures,
+            "; ".join(failures) if failures else describe(old_field, new_field, expect_new),
+        ))
+        if failures:
+            return _result(change_id, _OUTCOME_FAILED, steps,
+                           detail="; ".join(failures))
+
+        return _result(change_id, _OUTCOME_PASSED, steps,
+                       detail=describe(old_field, new_field, expect_new))
     finally:
-        _cleanup_compose(compose_file, project_name=project_name)
+        # Always stop the provider. A leaked uvicorn holds its port and breaks
+        # the next rehearsal, and a rehearsal that cannot rerun is worse than
+        # one that failed.
+        _stop_provider(process)
 
-    status: str = "verified" if returncode == 0 else "failed"
-    confidence: str = "confirmed" if returncode == 0 else "refuted"
 
-    evidence = Evidence(
-        claim_type="test_result",
-        subject=consumer,
-        content={
-            "returncode": returncode,
-            "docker_output": output,
-            "compose_file": str(compose_file),
-            "timed_out": timed_out,
-        },
-        source_ref=str(compose_file),
-        confidence=confidence,
-        source_revision=commit_ref,
+def _run_declared_check(
+    change_id: str,
+    provider_dir: Path,
+    command: list[str],
+    old_field: str,
+    new_field: str,
+    expect_new: bool,
+) -> dict[str, Any]:
+    """
+    Run a provider's own coexistence command.
+
+    The symbols and the expectation are passed as environment variables so the
+    command can assert against them without Interlock knowing anything about how
+    the provider works. Executed without a shell.
+    """
+    import os
+
+    from orchestrator.manifest import environment_for, resolve_program
+
+    # environment_for() puts Git's POSIX tools on PATH when the command is a
+    # bundled shell, so a declared `sh coexistence_check.sh` can use grep and
+    # sed the way its author intended.
+    env = {
+        **(environment_for(list(command)) or os.environ),
+        "INTERLOCK_OLD_SYMBOL": old_field,
+        "INTERLOCK_NEW_SYMBOL": new_field,
+        "INTERLOCK_EXPECT_NEW": "1" if expect_new else "0",
+    }
+    try:
+        result = subprocess.run(
+            resolve_program(list(command)), cwd=str(provider_dir),
+            capture_output=True, text=True, env=env,
+            timeout=_DECLARED_CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return _result(change_id, _OUTCOME_FAILED, steps=[], detail=(
+            f"declared coexistence check timed out after "
+            f"{_DECLARED_CHECK_TIMEOUT_SECONDS}s"
+        ))
+    except OSError as exc:
+        return _result(change_id, _OUTCOME_NOT_RUN, steps=[], detail=(
+            f"could not execute the declared coexistence command {command!r}: {exc}"
+        ))
+
+    output = (result.stdout + result.stderr)[-_OUTPUT_TAIL_CHARS:]
+    passed = result.returncode == 0
+    step = _step(
+        "declared-coexistence-check",
+        passed,
+        f"{' '.join(command)} -> exit {result.returncode}",
+    )
+    step["output_tail"] = output
+    return _result(
+        change_id,
+        _OUTCOME_PASSED if passed else _OUTCOME_FAILED,
+        [step],
+        detail=(
+            f"provider proved coexistence via its own check: {' '.join(command)}"
+            if passed
+            else f"declared coexistence check failed (exit {result.returncode})"
+        ),
     )
 
-    return VerificationResult(
-        change_id=change_id,
-        consumer=consumer,
-        status=status,
-        evidence=[evidence],
-    )
+
+# ---------------------------------------------------------------------------
+# Result construction
+# ---------------------------------------------------------------------------
+
+def _step(name: str, passed: bool, detail: str) -> dict[str, Any]:
+    return {"step": name, "passed": passed, "detail": detail}
+
+
+def _result(
+    change_id: str,
+    outcome: str,
+    steps: list[dict[str, Any]],
+    detail: str,
+) -> dict[str, Any]:
+    """Build the VerificationResult payload. Single construction point."""
+    passed = outcome == _OUTCOME_PASSED
+    return {
+        "change_id": change_id,
+        "consumer": "coexistence-rehearsal",
+        "status": "verified" if passed else "failed",
+        "evidence": [
+            {
+                "claim_type": "test_result",
+                "subject": "coexistence-rehearsal",
+                "content": {
+                    "tests_passed": passed,
+                    "outcome": outcome,
+                    "detail": detail,
+                    "steps": steps,
+                },
+                "source_ref": _DEFAULT_PROVIDER_PATH,
+                "confidence": "confirmed",
+                "source_revision": None,
+            }
+        ],
+    }

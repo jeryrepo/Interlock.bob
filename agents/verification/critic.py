@@ -46,19 +46,37 @@ from orchestrator.schemas.verification import VerificationResult
 
 
 # ---------------------------------------------------------------------------
-# Known real component names that must have commit-backed migration evidence.
-# Planning-stage summary entries (e.g. "migration-plan") are intentionally
-# excluded — they are never expected to carry a source_revision.
+# Which migration_status subjects must carry a commit SHA.
+#
+# This used to be an allowlist of the four demo component names, including
+# "analytics-worker".  That broke AGENTS.md invariant 6 twice over: it hardcoded
+# the dependency that is supposed to be *discovered*, and — worse — any change
+# involving a component not on the list silently skipped the missing-commit
+# check, weakening verification exactly where it was least expected.
+#
+# The set of real components is now derived from evidence (see
+# ``_component_subjects``).  What remains hardcoded is only the planner's own
+# output subject: a planning artifact describes intent, not code, so it is never
+# expected to reference an implementation commit.  Naming the planner's artifact
+# is not naming a discovered component.
 # ---------------------------------------------------------------------------
 
-_REAL_COMPONENTS: frozenset[str] = frozenset(
-    {
-        "account-service",
-        "checkout",
-        "fraud",
-        "analytics-worker",
+_PLANNING_SUBJECTS: frozenset[str] = frozenset({"migration-plan"})
+
+
+def _component_subjects(evidence_items: list[dict]) -> set[str]:
+    """
+    Derive the set of real component names from the evidence itself.
+
+    Discovery emits one ``dependency`` claim per component it found, so their
+    subjects are exactly the components this change touches — including any
+    undocumented consumer, which is the whole point.  Nothing is hardcoded.
+    """
+    return {
+        item.get("subject", "")
+        for item in evidence_items
+        if item.get("claim_type") == "dependency" and item.get("subject")
     }
-)
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
@@ -147,21 +165,33 @@ def _check_missing_consumers(
 def _check_missing_commit_refs(
     evidence_items: list[dict],
     change_id: str,
+    components: set[str] | None = None,
 ) -> list[Evidence]:
     """
     Flag a risk for any ``migration_status`` evidence item that lacks a
     ``source_revision`` (i.e. no real commit SHA was recorded).
 
-    Only applied to evidence whose ``subject`` is a known real component
-    (see ``_REAL_COMPONENTS``).  Planning-stage summary entries such as
-    ``"migration-plan"`` are intentionally skipped — a plan is never
-    expected to reference an implementation commit.
+    Parameters
+    ----------
+    components : set[str] | None
+        The components this change is known to touch, from
+        ``required_consumers`` unioned with the subjects of discovery's
+        ``dependency`` evidence.  When non-empty, only these subjects are
+        checked.  When empty — meaning we have no evidence of what the real
+        components are — every ``migration_status`` subject is checked except
+        the planner's own artifact, which fails *closed* rather than silently
+        skipping unknown components.
     """
+    known = components or set()
     risks: list[Evidence] = []
     for item in evidence_items:
         if item.get("claim_type") != "migration_status":
             continue
-        if item.get("subject") not in _REAL_COMPONENTS:
+        subject = item.get("subject")
+        if known:
+            if subject not in known:
+                continue
+        elif subject in _PLANNING_SUBJECTS:
             continue
         if not item.get("source_revision"):
             risks.append(
@@ -279,7 +309,7 @@ def run(
         If the HTTP call to the orchestrator fails.
     """
     change_id: str = data.get("change_id", "")
-    consumer: str = data.get("consumer", "critic")
+    consumer: str = data.get("consumer") or "critic"
     required_consumers: list[str] = data.get("required_consumers", [])
     latest_migration_commit_ts: str | None = data.get("latest_migration_commit_ts")
 
@@ -308,7 +338,11 @@ def run(
         _check_missing_consumers(evidence_items, required_consumers, change_id)
     )
     risks.extend(
-        _check_missing_commit_refs(evidence_items, change_id)
+        _check_missing_commit_refs(
+            evidence_items,
+            change_id,
+            components=set(required_consumers) | _component_subjects(evidence_items),
+        )
     )
     risks.extend(
         _check_stale_test_evidence(evidence_items, latest_migration_commit_ts, change_id)

@@ -1,0 +1,6 @@
+[component]
+language = "c"
+test_command = "sh run_tests.sh"
+# The provider is a C library, not a web service, so it proves coexistence
+# its own way instead of being started as an ASGI app.
+coexistence_command = "sh coexistence_check.sh"

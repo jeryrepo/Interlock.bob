@@ -110,7 +110,11 @@ class TestAdvance:
         ledger.upsert_consumer_migration(conn, cid, "checkout", "in_progress")
 
         # MODIFY → REHEARSE
-        ledger.add_evidence(conn, cid, "test_result", "x", {}, "f", "confirmed")
+        # Subject must be the rehearsal itself: any test_result used to satisfy
+        # this precondition, which let a change leave REHEARSE without one.
+        ledger.add_evidence(
+            conn, cid, "test_result", "coexistence-rehearsal", {}, "f", "confirmed"
+        )
         sm.advance(conn, cid)
 
         # REHEARSE → VERIFY

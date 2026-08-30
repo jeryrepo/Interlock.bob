@@ -1,48 +1,56 @@
-# docker-compose.yml
-# Interlock — Verification Coexistence Rehearsal
+# Interlock coexistence rehearsal — optional containerised path
+# =============================================================
+# This is NOT how the rehearsal normally runs.
 #
-# Runs the four fixture services as isolated Docker containers.
-# Each service builds from its own fixtures/ Dockerfile and executes
-# its pytest test suite.  All containers exit after their suite completes.
+# `agents/verification/coexistence_rehearsal.py` starts the provider as a local
+# uvicorn subprocess and asserts against it directly: no daemon, ~1 second, runs
+# in CI. This file exists for demos where seeing the provider come up in a
+# container is worth the image builds.
 #
-# The --abort-on-container-exit flag (used by coexistence_rehearsal.py)
-# causes the whole stack to stop as soon as any container exits, and the
-# exit code of the tracked service (--exit-code-from checkout) propagates
-# to the docker compose process.
+# Both paths share one implementation of the assertions
+# (`agents/verification/rehearsal/probe.py::check_payload`), so they cannot
+# drift apart and claim different things.
 #
-# Design constraints (team contract):
-#   - No Kafka, no Kubernetes, no Temporal, no external services.
-#   - Keep infrastructure minimal: four services, one compose file.
-#   - account-service CMD is overridden to run pytest (the fixture's app.py
-#     is a plain module, not a FastAPI/uvicorn app in pre-migration state).
+# The consumer services that used to be here were removed deliberately. The
+# consumer fixtures are pure functions taking a dict — `process_order(
+# account_response: dict, ...)` — and make no HTTP calls, so containerising
+# their pytest runs re-ran exactly what contract_test.py already covers and
+# proved nothing about coexistence.
+#
+#   docker compose up -d account-service
+#   docker compose run --rm coexistence-probe      # EXPECT_NEW=1 once patched
+#   docker compose down -v
+
+name: interlock-rehearsal
 
 services:
 
+  # The provider under migration.
   account-service:
-    build:
-      context: ./fixtures/account-service
-      dockerfile: Dockerfile
-    # Override the default CMD (uvicorn) — the fixture is a plain module,
-    # not a running HTTP server.  The rehearsal validates the test suite.
-    command: ["python", "-m", "pytest", "tests/", "-v", "--tb=short"]
+    build: ./fixtures/account-service
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # No curl in python:3.11-slim — use the interpreter that is already here.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
 
-  checkout:
-    build:
-      context: ./fixtures/checkout
-      dockerfile: Dockerfile
+  # The coexistence proof. EXPECT_NEW flips to "1" once the provider patch has
+  # landed, at which point both fields must be served.
+  coexistence-probe:
+    build: ./agents/verification/rehearsal
     depends_on:
-      - account-service
-
-  fraud:
-    build:
-      context: ./fixtures/fraud
-      dockerfile: Dockerfile
-    depends_on:
-      - account-service
-
-  analytics-worker:
-    build:
-      context: ./fixtures/analytics-worker
-      dockerfile: Dockerfile
-    depends_on:
-      - account-service
+      account-service:
+        condition: service_healthy
+    environment:
+      PROVIDER_URL: http://account-service:8000
+      OLD_FIELD: ${OLD_FIELD:-customer_id}
+      NEW_FIELD: ${NEW_FIELD:-account_id}
+      EXPECT_NEW: ${EXPECT_NEW:-0}

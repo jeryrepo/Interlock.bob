@@ -100,3 +100,46 @@ CREATE INDEX IF NOT EXISTS idx_dependency_edge_change   ON dependency_edge(chang
 CREATE INDEX IF NOT EXISTS idx_consumer_migration_change ON consumer_migration(change_id);
 CREATE INDEX IF NOT EXISTS idx_approval_change          ON approval(change_id);
 CREATE INDEX IF NOT EXISTS idx_gate_decision_change     ON gate_decision(change_id);
+
+-- ------------------------------------------------------------
+-- change_spec
+-- 1:1 with change_request.  Structured intent for a change.
+--
+-- A side table rather than columns on change_request, for two reasons.
+-- init_db() runs executescript(schema.sql) on EVERY startup, so a new
+-- CREATE TABLE IF NOT EXISTS applies itself to existing databases, while a
+-- new column would silently not.  And main.py builds ChangeResponse(**row)
+-- from change_request, so widening that table would change the response
+-- shape for every existing client.
+--
+-- Absent row => a legacy description-only change, which runs the stub
+-- workflow.  kind: field_rename | api_contract_change | transport_migration
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS change_spec (
+    change_id  TEXT PRIMARY KEY REFERENCES change_request(id),
+    kind       TEXT NOT NULL,
+    spec       TEXT NOT NULL,      -- JSON, validated before insert
+    created_at TEXT NOT NULL
+);
+
+-- ------------------------------------------------------------
+-- work_item
+-- One row per (change, component, step_kind).  Supersedes
+-- consumer_migration, whose ledger functions are now a projection
+-- over step_kind = 'migrate'.
+--
+-- step_kind: provider_patch | migrate | subscribe | webhook_quiet
+-- status:    pending | in_progress | verified | failed | blocked
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS work_item (
+    id         TEXT PRIMARY KEY,
+    change_id  TEXT NOT NULL REFERENCES change_request(id),
+    component  TEXT NOT NULL,
+    step_kind  TEXT NOT NULL DEFAULT 'migrate',
+    status     TEXT NOT NULL DEFAULT 'pending',
+    detail     TEXT,               -- JSON: commit_sha, error, blocked_reason
+    updated_at TEXT NOT NULL,
+    UNIQUE (change_id, component, step_kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_item_change ON work_item(change_id);

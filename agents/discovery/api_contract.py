@@ -33,6 +33,9 @@ import yaml
 
 from orchestrator.schemas import Dependency, DiscoveryResult, Evidence
 
+# One definition of what counts as a component, shared with repo_map.
+from agents.discovery.repo_map import component_dirs
+
 # Name of the provider component
 _PROVIDER = "account-service"
 
@@ -106,6 +109,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     Returns a dict that validates as DiscoveryResult.
     """
     change_id: str = data["change_id"]
+    provider: str = data.get("provider", _PROVIDER)
     old_field: str = data.get("old_field", "customer_id")
 
     if "fixtures_root" in data:
@@ -117,7 +121,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
     dependencies: list[Dependency] = []
 
     # ── Step 1: parse account-service OpenAPI spec ────────────────────────────
-    provider_dir = fixtures_root / _PROVIDER
+    provider_dir = fixtures_root / provider
     openapi_path = provider_dir / _OPENAPI_FILENAME
     openapi_rel = openapi_path.relative_to(fixtures_root).as_posix()
 
@@ -126,7 +130,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
         evidence.append(
             Evidence(
                 claim_type="dependency",
-                subject=_PROVIDER,
+                subject=provider,
                 content={
                     "spec_file": openapi_rel,
                     "field": old_field,
@@ -140,10 +144,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
         )
 
     # ── Step 2: scan all other fixture dirs for API consumers ─────────────────
-    consumer_dirs = sorted(
-        p for p in fixtures_root.iterdir()
-        if p.is_dir() and p.name != _PROVIDER
-    )
+    consumer_dirs = component_dirs(fixtures_root, exclude=provider)
 
     for consumer_dir in consumer_dirs:
         component = consumer_dir.name
@@ -183,7 +184,7 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
                 subject=component,
                 content={
                     "consumer": component,
-                    "provider": _PROVIDER,
+                    "provider": provider,
                     "field": old_field,
                     "refs": consumer_refs,
                     "detection": (
@@ -198,8 +199,8 @@ def run(data: dict[str, Any]) -> dict[str, Any]:
 
         dependencies.append(
             Dependency(
-                from_component=component,
-                to_component=_PROVIDER,
+                from_component=provider,
+                to_component=component,
                 edge_type="api",
                 reason=(
                     f"Source code accesses {_API_RESPONSE_VAR}[\"{old_field}\"] "

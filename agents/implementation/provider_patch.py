@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 from typing import Any, TypedDict
@@ -58,6 +59,13 @@ class _PatchResult(TypedDict):
     status: str              # "success" | "failed"
 
 
+# Bounded so a hung or interactive command cannot stall the gate forever. A
+# component declares its own test command, so this process has no way to know
+# the command terminates. Expiry is reported as "could not run", never a pass.
+_GIT_TIMEOUT_SECONDS = 60
+_TEST_TIMEOUT_SECONDS = 600
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -65,7 +73,14 @@ class _PatchResult(TypedDict):
 def _run_git(args: list[str], repo_path: Path) -> str:
     """Run a git command scoped to repo_path; raise RuntimeError on failure."""
     cmd = ["git", "-C", str(repo_path)] + args
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"git {' '.join(args)} timed out after {_GIT_TIMEOUT_SECONDS}s"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"git {' '.join(args)} failed (exit {result.returncode}):\n"
@@ -76,8 +91,24 @@ def _run_git(args: list[str], repo_path: Path) -> str:
 
 def _run_pytest(repo_path: Path) -> tuple[int, str]:
     """Run pytest inside repo_path; return (returncode, combined_output)."""
-    cmd = [sys.executable, "-m", "pytest", str(repo_path), "-v", "--tb=short", "-p", "no:langsmith"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Hermetic pytest: a repo_path inside a tree that carries a pytest.ini
+    # (Interlock's own tests place workspaces under `.pytest_tmp/`) makes the
+    # inner pytest inherit `--basetemp=.pytest_tmp` from that ini — and pytest
+    # DELETES its basetemp at session start, wiping the outer test run's live
+    # temp directories. A private basetemp isolates the inner run completely.
+    cmd = [
+        sys.executable, "-m", "pytest", str(repo_path), "-v", "--tb=short",
+        "-p", "no:cacheprovider",
+        "--basetemp", str(Path(tempfile.mkdtemp(prefix="interlock-bt-")) / "bt"),
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_TEST_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired:
+        # A suite that never finished has proven nothing. 124 is the
+        # conventional timeout exit code; the caller treats non-zero as failure.
+        return 124, f"tests timed out after {_TEST_TIMEOUT_SECONDS}s"
     combined = result.stdout + result.stderr
     return result.returncode, combined
 
@@ -227,6 +258,18 @@ def _ensure_test_assertions(
     If no existing test file content, generate a minimal test.
     Returns (new_content, was_changed).
     """
+    # A pre-migration suite may assert that new_field is ABSENT.  That
+    # assertion documents the state before the patch, and this patch is exactly
+    # what makes it false — so leaving it would fail the provider's own suite
+    # and cause the patch to be rejected.  Flip it rather than delete it: after
+    # the compatibility window opens, the field genuinely is present.
+    negative = re.compile(
+        r'(assert\s+["\']' + re.escape(new_field) + r'["\']\s+)not\s+in\s+',
+    )
+    if negative.search(content):
+        content = negative.sub(r"\1in ", content)
+        return content, True
+
     if new_field in content and f'"{new_field}"' in content:
         # Already asserts new_field.
         return content, False
@@ -366,6 +409,11 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
             path.write_text(new_content, encoding="utf-8")
             files_changed.append(str(rel))
 
+    # Source changes that are not tests. Tracked separately from files_changed
+    # because a run that only wrote its own test file has proved nothing — see
+    # the guard before Step 6.
+    source_files_changed: list[str] = list(files_changed)
+
     # ------------------------------------------------------------------
     # Step 5: Update or create test files.
     # ------------------------------------------------------------------
@@ -402,6 +450,49 @@ def run(data: dict[str, Any], repo_path: Path) -> dict[str, Any]:
         test_file.write_text(stub, encoding="utf-8")
         rel = test_file.relative_to(repo_path)
         files_changed.append(str(rel))
+
+    # ------------------------------------------------------------------
+    # Step 5b: Refuse to report success for a patch that changed no source.
+    # ------------------------------------------------------------------
+    # `status` used to be "success" whenever pytest passed, decoupled from
+    # whether this agent had changed anything. The three patterns above match
+    # field-shaped symbols (annotations, dict keys, assignments); a symbol of a
+    # different shape — a function name, as in a webhook -> pub/sub transport
+    # cut-over — matches none of them. The agent then wrote nothing, committed,
+    # and the provider_patch work item was marked verified while the provider
+    # had not gained the new symbol at all. Absence of a change is not proof.
+    if not source_files_changed:
+        return {
+            "repository": str(repo_path),
+            "files_changed": [],
+            "summary": (
+                f"No source file in '{provider}' could be patched to introduce "
+                f"'{new_field}' alongside '{old_field}'. Reporting failure "
+                f"rather than success: this agent patches field-shaped symbols "
+                f"(class annotations, dict keys, assignments) and OpenAPI "
+                f"properties. A symbol of another shape is unproven, not safe."
+            ),
+            "commit_sha": None,
+            "evidence": [
+                {
+                    "claim_type": "risk",
+                    "subject": provider,
+                    "content": {
+                        "risk": "provider_patch_changed_nothing",
+                        "detail": (
+                            f"provider-patch modified no source file under "
+                            f"{repo_path}. '{new_field}' was never introduced, "
+                            f"so any consumer migrated to it depends on a "
+                            f"symbol the provider does not expose."
+                        ),
+                    },
+                    "source_ref": str(repo_path),
+                    "confidence": "confirmed",
+                    "source_revision": None,
+                }
+            ],
+            "status": "failed",
+        }
 
     # ------------------------------------------------------------------
     # Step 6: Run pytest.

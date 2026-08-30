@@ -1,388 +1,394 @@
 """
 tests/verification/test_coexistence_rehearsal.py
 =================================================
-Tests for agents/verification/coexistence_rehearsal.py.
+Tests for the coexistence-rehearsal agent.
 
-Tests are divided into two groups:
-
-  NON-DOCKER: Test the internal module structure, schema of return types, and
-  input validation — without invoking docker compose.  These pass even when
-  Docker Desktop is not running.
-
-  DOCKER (@pytest.mark.docker): Tests that actually call docker compose as a
-  subprocess.  Automatically skipped when Docker is unavailable (see conftest.py).
-  Run them explicitly with:
-
-    pytest -m docker tests/verification/test_coexistence_rehearsal.py
-
-Proven properties:
-  - run() returns a schema-valid VerificationResult (all VerificationResult
-    fields and Evidence fields are present and correctly typed).
-  - run() raises ValueError for missing change_id (no Docker needed).
-  - Docker compose is actually invoked as a subprocess (real output, not mocked).
-  - A broken service (bad CMD override) causes status="failed", not "verified".
-  - evidence[0].content["docker_output"] contains real docker output.
-  - evidence[0].claim_type == "test_result".
-  - No fixture mutation from any test.
+The agent's whole value is that it refuses to claim a proof it did not obtain,
+so most of these drive it down a failure path. ``_start_provider`` and
+``_get_json`` are monkeypatched for the unit tests — the same seam pattern
+``test_critic.py`` uses for ``_get_evidence`` — so they need no network and no
+real server. The tests at the bottom start a genuine uvicorn process against the
+real fixture; they are marked ``integration`` but need no Docker daemon, so they
+run by default.
 """
 
 from __future__ import annotations
 
-import textwrap
+import ast
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from agents.verification import coexistence_rehearsal as rehearsal_module
-from agents.verification.coexistence_rehearsal import run as rehearsal_run
-from orchestrator.schemas.verification import VerificationResult
+from agents.verification import coexistence_rehearsal
+from agents.verification.coexistence_rehearsal import run
+from agents.verification.rehearsal.probe import check_payload
+from orchestrator.schemas import VerificationResult
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-REPO_ROOT = Path(__file__).parent.parent.parent
-COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
-FIXTURES = REPO_ROOT / "fixtures"
+CHANGE_ID = "cr-001"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------------------
-# Non-Docker tests: input validation and schema structure
-# (These never call docker compose)
+# Harness
 # ---------------------------------------------------------------------------
 
-class TestCoexistenceRehearsalInputValidation:
-    """Input validation — no Docker required."""
+class FakeProcess:
+    """Stands in for the uvicorn Popen handle."""
 
-    def test_missing_change_id_raises_value_error(self, tmp_path: Path):
-        """run() must raise ValueError if change_id is absent."""
-        fake_compose = tmp_path / "any.yml"
-        fake_compose.write_text("services: {}\n")
+    def __init__(self, exit_code: int | None = None, log: str = ""):
+        self._exit_code = exit_code
+        self.returncode = exit_code
+        self.terminated = False
+        self.killed = False
+        self.stdout = _FakeStdout(log)
 
-        with pytest.raises(ValueError, match="change_id"):
-            rehearsal_run({}, fake_compose)
+    def poll(self):
+        return self._exit_code
 
-    def test_change_id_required_not_empty(self, tmp_path: Path):
-        """An empty change_id must also raise ValueError."""
-        fake_compose = tmp_path / "any.yml"
-        fake_compose.write_text("services: {}\n")
+    def terminate(self):
+        self.terminated = True
+        self._exit_code = 0
+        self.returncode = 0
 
-        with pytest.raises(ValueError, match="change_id"):
-            rehearsal_run({"change_id": ""}, fake_compose)
+    def kill(self):
+        self.killed = True
 
-
-# Module-level mock functions (plain callables, not bound methods — safe to use
-# with patch.object which replaces the module attribute).
-def _mock_run_compose_success(compose_file, project_name="interlock-rehearsal", extra_args=None, timeout=300):
-    return 0, "Successfully ran all tests\npassed\n"
-
-
-def _mock_run_compose_failure(compose_file, project_name="interlock-rehearsal", extra_args=None, timeout=300):
-    return 1, "FAILED\ncontainer exited with code 1\n"
+    def wait(self, timeout=None):
+        return self.returncode
 
 
-class TestCoexistenceRehearsalSchemaMocked:
-    """
-    Schema and return-type validation using a mocked _run_compose.
-    No Docker process is spawned — the mock returns a fixed (returncode, output).
-    """
+class _FakeStdout:
+    def __init__(self, text: str):
+        self._text = text
 
-    def test_successful_run_returns_verified(self, tmp_path: Path):
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", _mock_run_compose_success):
-            result = rehearsal_run(
-                {"change_id": "cr-mock-ok", "consumer": "coexistence"},
-                fake_compose,
-                project_name="test-ok",
-            )
-
-        assert isinstance(result, VerificationResult)
-        assert result.status == "verified"
-        assert result.change_id == "cr-mock-ok"
-        assert result.consumer == "coexistence"
-
-    def test_failed_run_returns_failed(self, tmp_path: Path):
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", _mock_run_compose_failure):
-            result = rehearsal_run(
-                {"change_id": "cr-mock-fail", "consumer": "coexistence"},
-                fake_compose,
-                project_name="test-fail",
-            )
-
-        assert result.status == "failed"
-
-    def test_result_has_docker_output_in_content(self, tmp_path: Path):
-        """evidence content must have docker_output key."""
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", _mock_run_compose_success):
-            result = rehearsal_run(
-                {"change_id": "cr-mock-output", "consumer": "coexistence"},
-                fake_compose,
-                project_name="test-output",
-            )
-
-        assert "docker_output" in result.evidence[0].content
-        assert "passed" in result.evidence[0].content["docker_output"]
-
-    def test_evidence_claim_type_is_test_result(self, tmp_path: Path):
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", _mock_run_compose_success):
-            result = rehearsal_run(
-                {"change_id": "cr-claim-type", "consumer": "coexistence"},
-                fake_compose,
-                project_name="test-claim",
-            )
-
-        assert len(result.evidence) == 1
-        assert result.evidence[0].claim_type == "test_result"
-
-    def test_result_serialisable_to_dict(self, tmp_path: Path):
-        """VerificationResult must be serialisable via Pydantic model_dump."""
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", _mock_run_compose_success):
-            result = rehearsal_run(
-                {"change_id": "cr-serial", "consumer": "coexistence"},
-                fake_compose,
-                project_name="test-serial",
-            )
-
-        d = result.model_dump()
-        assert d["change_id"] == "cr-serial"
-        assert d["evidence"][0]["claim_type"] == "test_result"
-
-    def test_commit_ref_stored_in_source_revision(self, tmp_path: Path):
-        """A provided commit_ref must appear in evidence source_revision."""
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", _mock_run_compose_success):
-            result = rehearsal_run(
-                {
-                    "change_id": "cr-rev-test",
-                    "consumer": "coexistence",
-                    "commit_ref": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                },
-                fake_compose,
-                project_name="test-rev",
-            )
-
-        assert result.evidence[0].source_revision == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-
-    def test_consumer_defaults_to_coexistence(self, tmp_path: Path):
-        """consumer defaults to 'coexistence' when not supplied."""
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", _mock_run_compose_success):
-            result = rehearsal_run(
-                {"change_id": "cr-default-consumer"},
-                fake_compose,
-                project_name="test-consumer",
-            )
-
-        assert result.consumer == "coexistence"
+    def read(self):
+        return self._text
 
 
-class TestDockerUnavailable:
-    """
-    Soft-fail path: FileNotFoundError when Docker binary is missing.
-    No Docker process is spawned — _run_compose raises FileNotFoundError.
-    """
-
-    def _mock_run_compose_no_docker(self, *args, **kwargs):
-        raise FileNotFoundError(2, "The system cannot find the file specified")
-
-    def test_returns_verified_status(self, tmp_path: Path):
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", self._mock_run_compose_no_docker):
-            result = rehearsal_run(
-                {"change_id": "cr-no-docker", "consumer": "coexistence"},
-                fake_compose,
-            )
-
-        assert result.status == "verified"
-
-    def test_evidence_claim_type_is_risk(self, tmp_path: Path):
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", self._mock_run_compose_no_docker):
-            result = rehearsal_run(
-                {"change_id": "cr-no-docker-risk", "consumer": "coexistence"},
-                fake_compose,
-            )
-
-        assert result.evidence[0].claim_type == "risk"
-
-    def test_evidence_note_mentions_docker_unavailable(self, tmp_path: Path):
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", self._mock_run_compose_no_docker):
-            result = rehearsal_run(
-                {"change_id": "cr-no-docker-note", "consumer": "coexistence"},
-                fake_compose,
-            )
-
-        note = result.evidence[0].content.get("note", "")
-        assert "Docker unavailable" in note
-
-    def test_evidence_confidence_is_hypothesis(self, tmp_path: Path):
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
-
-        with patch.object(rehearsal_module, "_run_compose", self._mock_run_compose_no_docker):
-            result = rehearsal_run(
-                {"change_id": "cr-no-docker-conf", "consumer": "coexistence"},
-                fake_compose,
-            )
-
-        assert result.evidence[0].confidence == "hypothesis"
+@pytest.fixture
+def provider(tmp_path: Path) -> Path:
+    """A project root containing a plausible provider directory."""
+    (tmp_path / "fixtures" / "account-service").mkdir(parents=True)
+    return tmp_path
 
 
-class TestNoFixtureMutationMocked:
-    """
-    No fixture files are changed by running the rehearsal agent.
-    Uses mocked _run_compose so no Docker process is spawned.
-    """
+def _install(monkeypatch, *, process=None, payload=None, fail_get=None):
+    """Wire the seams. Returns the fake process so tests can inspect teardown."""
+    proc = process if process is not None else FakeProcess()
+    monkeypatch.setattr(coexistence_rehearsal, "_start_provider",
+                        lambda provider_dir, port: proc)
 
-    def test_fixtures_not_mutated_by_rehearsal(self, tmp_path: Path):
-        checkout_before = (FIXTURES / "checkout" / "checkout.py").read_text()
-        fraud_before = (FIXTURES / "fraud" / "fraud.py").read_text()
-        analytics_before = (FIXTURES / "analytics-worker" / "worker.py").read_text()
-        account_before = (FIXTURES / "account-service" / "app.py").read_text()
+    def fake_get(url, timeout=5.0):
+        if fail_get:
+            raise fail_get
+        if url.endswith("/health"):
+            return {"status": "ok"}
+        return payload if payload is not None else {"customer_id": "probe-001"}
 
-        fake_compose = tmp_path / "compose.yml"
-        fake_compose.write_text("services: {}\n")
+    monkeypatch.setattr(coexistence_rehearsal, "_get_json", fake_get)
+    return proc
 
-        with patch.object(rehearsal_module, "_run_compose", _mock_run_compose_success):
-            rehearsal_run(
-                {"change_id": "cr-guard", "consumer": "coexistence"},
-                fake_compose,
-                project_name="test-guard",
-            )
 
-        assert (FIXTURES / "checkout" / "checkout.py").read_text() == checkout_before, (
-            "fixtures/checkout/checkout.py was mutated by rehearsal."
-        )
-        assert (FIXTURES / "fraud" / "fraud.py").read_text() == fraud_before, (
-            "fixtures/fraud/fraud.py was mutated by rehearsal."
-        )
-        assert (FIXTURES / "analytics-worker" / "worker.py").read_text() == analytics_before, (
-            "fixtures/analytics-worker/worker.py was mutated by rehearsal."
-        )
-        assert (FIXTURES / "account-service" / "app.py").read_text() == account_before, (
-            "fixtures/account-service/app.py was mutated by rehearsal."
-        )
+def _content(result: dict) -> dict:
+    return result["evidence"][0]["content"]
 
 
 # ---------------------------------------------------------------------------
-# Docker-dependent tests — require Docker Desktop to be running
+# The happy path
 # ---------------------------------------------------------------------------
 
-@pytest.mark.docker
-class TestCoexistenceRehearsalDocker:
-    """
-    Real Docker Compose tests.  These tests actually call docker compose,
-    build images from the fixture Dockerfiles, and run the test suites.
+class TestSuccessfulRehearsal:
+    def test_pre_migration_shape_is_verified(self, provider, monkeypatch):
+        _install(monkeypatch, payload={"customer_id": "probe-001"})
+        result = run({"change_id": CHANGE_ID}, provider)
+        assert result["status"] == "verified"
+        assert _content(result)["outcome"] == "coexistence_proven"
 
-    Skip condition: Docker is not available (see conftest.py).
+    def test_post_migration_both_fields_is_verified(self, provider, monkeypatch):
+        _install(monkeypatch,
+                 payload={"customer_id": "probe-001", "account_id": "probe-001"})
+        result = run({"change_id": CHANGE_ID, "expect_new": True}, provider)
+        assert result["status"] == "verified"
 
-    Run with:
-        pytest -m docker tests/verification/test_coexistence_rehearsal.py
-    """
+    def test_every_step_is_recorded(self, provider, monkeypatch):
+        _install(monkeypatch)
+        result = run({"change_id": CHANGE_ID}, provider)
+        steps = {s["step"] for s in _content(result)["steps"]}
+        assert steps == {"provider-start", "probe-request", "coexistence-assertions"}
 
-    def test_rehearsal_succeeds_with_real_compose_file(self):
+
+# ---------------------------------------------------------------------------
+# Failure detection — the reason this agent exists
+# ---------------------------------------------------------------------------
+
+class TestFailureDetection:
+    def test_missing_new_field_after_migration_fails(self, provider, monkeypatch):
+        """The headline case: the provider has not been patched but we expect it to be."""
+        _install(monkeypatch, payload={"customer_id": "probe-001"})
+        result = run({"change_id": CHANGE_ID, "expect_new": True}, provider)
+        assert result["status"] == "failed"
+        assert "account_id" in _content(result)["detail"]
+
+    def test_missing_legacy_field_fails(self, provider, monkeypatch):
+        """Dropping the old field breaks every un-migrated consumer."""
+        _install(monkeypatch, payload={"account_id": "probe-001"})
+        result = run({"change_id": CHANGE_ID, "expect_new": True}, provider)
+        assert result["status"] == "failed"
+        assert "customer_id" in _content(result)["detail"]
+
+    def test_new_field_present_too_early_fails(self, provider, monkeypatch):
         """
-        Run docker compose against the real docker-compose.yml.
-        All four fixture services run their pytest suites and must exit 0.
+        If the new field is already served when we expect pre-migration state,
+        the rehearsal is not observing what it claims to observe.
         """
-        result = rehearsal_run(
-            {"change_id": "cr-docker-001", "consumer": "coexistence"},
-            COMPOSE_FILE,
-            project_name="interlock-rehearsal-main",
-            timeout=300,
+        _install(monkeypatch,
+                 payload={"customer_id": "probe-001", "account_id": "probe-001"})
+        result = run({"change_id": CHANGE_ID, "expect_new": False}, provider)
+        assert result["status"] == "failed"
+        assert "pre-migration state" in _content(result)["detail"]
+
+    def test_provider_that_never_starts_fails(self, provider, monkeypatch):
+        _install(monkeypatch, process=FakeProcess(exit_code=3, log="ImportError: no app"))
+        result = run({"change_id": CHANGE_ID}, provider)
+        assert result["status"] == "failed"
+        assert "did not start" in _content(result)["detail"]
+
+    def test_provider_startup_log_is_captured(self, provider, monkeypatch):
+        """A startup failure must not vanish — the log is the only diagnosis."""
+        _install(monkeypatch,
+                 process=FakeProcess(exit_code=3, log="ModuleNotFoundError: fastapi"))
+        result = run({"change_id": CHANGE_ID}, provider)
+        start_step = _content(result)["steps"][0]
+        assert "fastapi" in start_step["output_tail"]
+
+    def test_unanswerable_probe_request_fails(self, provider, monkeypatch):
+        proc = FakeProcess()
+        monkeypatch.setattr(coexistence_rehearsal, "_start_provider",
+                            lambda provider_dir, port: proc)
+
+        def flaky(url, timeout=5.0):
+            if url.endswith("/health"):
+                return {"status": "ok"}
+            raise OSError("connection reset")
+
+        monkeypatch.setattr(coexistence_rehearsal, "_get_json", flaky)
+        result = run({"change_id": CHANGE_ID}, provider)
+        assert result["status"] == "failed"
+        assert "did not answer" in _content(result)["detail"]
+
+
+class TestUnrunnableRehearsal:
+    """A rehearsal that did not run must never look like one that passed."""
+
+    def test_missing_provider_directory_is_failed(self, tmp_path):
+        result = run({"change_id": CHANGE_ID}, tmp_path)
+        assert result["status"] == "failed"
+        assert _content(result)["outcome"] == "rehearsal_could_not_run"
+
+    def test_missing_provider_directory_starts_nothing(self, tmp_path, monkeypatch):
+        started: list[int] = []
+        monkeypatch.setattr(coexistence_rehearsal, "_start_provider",
+                            lambda d, p: started.append(p))
+        run({"change_id": CHANGE_ID}, tmp_path)
+        assert started == []
+
+    def test_unlaunchable_provider_is_failed(self, provider, monkeypatch):
+        def boom(provider_dir, port):
+            raise OSError("no python")
+
+        monkeypatch.setattr(coexistence_rehearsal, "_start_provider", boom)
+        result = run({"change_id": CHANGE_ID}, provider)
+        assert result["status"] == "failed"
+        assert _content(result)["outcome"] == "rehearsal_could_not_run"
+
+
+# ---------------------------------------------------------------------------
+# Cleanup — a leaked uvicorn holds its port and breaks the next run
+# ---------------------------------------------------------------------------
+
+class TestTeardown:
+    def test_provider_is_stopped_on_success(self, provider, monkeypatch):
+        proc = _install(monkeypatch)
+        run({"change_id": CHANGE_ID}, provider)
+        assert proc.terminated
+
+    def test_provider_is_stopped_after_assertion_failure(self, provider, monkeypatch):
+        proc = _install(monkeypatch, payload={"account_id": "x"})
+        run({"change_id": CHANGE_ID, "expect_new": True}, provider)
+        assert proc.terminated
+
+    def test_provider_is_stopped_if_a_step_raises(self, provider, monkeypatch):
+        proc = FakeProcess()
+        monkeypatch.setattr(coexistence_rehearsal, "_start_provider",
+                            lambda d, p: proc)
+
+        def exploding(url, timeout=5.0):
+            if url.endswith("/health"):
+                return {"status": "ok"}
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(coexistence_rehearsal, "_get_json", exploding)
+        with pytest.raises(RuntimeError):
+            run({"change_id": CHANGE_ID}, provider)
+        assert proc.terminated
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+class TestConfiguration:
+    def test_field_names_are_not_hardcoded(self, provider, monkeypatch):
+        """Invariant 6: the change's fields arrive from data, not constants."""
+        _install(monkeypatch, payload={"user_ref": "probe-001"})
+        result = run(
+            {"change_id": CHANGE_ID, "old_field": "user_ref", "new_field": "party_ref"},
+            provider,
         )
+        assert result["status"] == "verified"
 
-        assert result.status == "verified", (
-            "docker compose rehearsal failed. Output:\n"
-            + result.evidence[0].content.get("docker_output", "")[-2000:]
+    def test_provider_path_is_configurable(self, tmp_path, monkeypatch):
+        (tmp_path / "services" / "billing").mkdir(parents=True)
+        _install(monkeypatch)
+        result = run(
+            {"change_id": CHANGE_ID, "provider_path": "services/billing"}, tmp_path
         )
+        assert result["status"] == "verified"
 
-    def test_rehearsal_output_contains_real_docker_output(self):
-        """evidence[0].content['docker_output'] must be a non-empty real string."""
-        result = rehearsal_run(
-            {"change_id": "cr-docker-002", "consumer": "coexistence"},
-            COMPOSE_FILE,
-            project_name="interlock-rehearsal-output",
-            timeout=300,
-        )
-
-        docker_output = result.evidence[0].content.get("docker_output", "")
-        assert isinstance(docker_output, str)
-        assert len(docker_output) > 0, "docker_output must be non-empty real output"
-
-    def test_rehearsal_repeated_run_is_idempotent(self):
+    def test_an_absolute_provider_path_is_not_joined_onto_repo_path(
+        self, tmp_path, monkeypatch
+    ):
         """
-        Running the rehearsal twice must produce the same status.
-        Proves Docker Compose is reliable and not order-dependent.
+        The orchestrator hands over an absolute path inside its isolated
+        workspace, while repo_path is already the provider directory. Joining
+        unconditionally produced `<ws>/account-service/account-service`, so the
+        rehearsal reported "provider directory not found" on every real run —
+        and because it wrote evidence but no work item, nothing noticed.
         """
-        result_1 = rehearsal_run(
-            {"change_id": "cr-docker-003a", "consumer": "coexistence"},
-            COMPOSE_FILE,
-            project_name="interlock-rehearsal-repeat-1",
-            timeout=300,
-        )
-        result_2 = rehearsal_run(
-            {"change_id": "cr-docker-003b", "consumer": "coexistence"},
-            COMPOSE_FILE,
-            project_name="interlock-rehearsal-repeat-2",
-            timeout=300,
-        )
+        provider_dir = tmp_path / "workspace" / "account-service"
+        provider_dir.mkdir(parents=True)
+        _install(monkeypatch)
 
-        assert result_1.status == result_2.status, (
-            "Repeated rehearsal runs returned different statuses — "
-            f"run 1: {result_1.status}, run 2: {result_2.status}"
+        result = run(
+            {"change_id": CHANGE_ID, "provider_path": str(provider_dir)},
+            provider_dir,  # repo_path is the provider dir, as in the real run
         )
+        assert result["status"] == "verified"
 
-    def test_broken_service_causes_failed_status(self, tmp_path: Path):
+    def test_each_run_binds_a_fresh_port(self):
+        """Parallel rehearsals must not collide on a fixed port."""
+        assert coexistence_rehearsal._free_port() != 0
+
+
+# ---------------------------------------------------------------------------
+# The shared assertion function
+# ---------------------------------------------------------------------------
+
+class TestCheckPayload:
+    """One implementation of 'what coexistence means', used by both run modes."""
+
+    def test_pre_migration_ok(self):
+        assert check_payload({"customer_id": "x"}, "customer_id", "account_id", False) == []
+
+    def test_post_migration_ok(self):
+        payload = {"customer_id": "x", "account_id": "x"}
+        assert check_payload(payload, "customer_id", "account_id", True) == []
+
+    def test_dropping_legacy_field_is_a_failure(self):
+        failures = check_payload({"account_id": "x"}, "customer_id", "account_id", True)
+        assert len(failures) == 1
+        assert "customer_id" in failures[0]
+
+    def test_both_conditions_can_fail_together(self):
+        failures = check_payload({}, "customer_id", "account_id", True)
+        assert len(failures) == 2
+
+
+# ---------------------------------------------------------------------------
+# Contract compliance
+# ---------------------------------------------------------------------------
+
+class TestSchemaCompliance:
+    def test_success_validates_against_shared_schema(self, provider, monkeypatch):
+        _install(monkeypatch)
+        assert VerificationResult(**run({"change_id": CHANGE_ID}, provider)).status == "verified"
+
+    def test_failure_validates_against_shared_schema(self, provider, monkeypatch):
+        _install(monkeypatch, payload={"account_id": "x"})
+        model = VerificationResult(**run({"change_id": CHANGE_ID, "expect_new": True}, provider))
+        assert model.status == "failed"
+
+    def test_only_test_result_evidence_is_emitted(self, provider, monkeypatch):
+        _install(monkeypatch)
+        result = run({"change_id": CHANGE_ID}, provider)
+        assert {e["claim_type"] for e in result["evidence"]} == {"test_result"}
+
+
+class TestSafetyConstraints:
+    """AGENTS.md invariants 1, 2 and 3, checked via imports rather than grep."""
+
+    @staticmethod
+    def _imported_names() -> set[str]:
+        tree = ast.parse(
+            Path(coexistence_rehearsal.__file__).read_text(encoding="utf-8")
+        )
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names.add(node.module)
+        return names
+
+    def test_does_not_import_sqlite(self):
+        assert not any(n.startswith("sqlite3") for n in self._imported_names())
+
+    def test_does_not_import_the_ledger(self):
+        assert not any("ledger" in n for n in self._imported_names())
+
+    def test_does_not_import_the_gate(self):
+        assert not any("gate" in n for n in self._imported_names())
+
+    def test_only_agent_import_is_its_own_probe(self):
         """
-        NEGATIVE PATH: A compose file with a service that runs a deliberately
-        broken command must cause status="failed", not silently "verified".
+        Invariant 3 forbids agent-to-agent calls. Importing a pure assertion
+        helper from this agent's own package is not that.
         """
-        broken_compose = tmp_path / "docker-compose-broken.yml"
-        broken_compose.write_text(textwrap.dedent("""\
-            services:
-              checkout:
-                build:
-                  context: ./fixtures/checkout
-                  dockerfile: Dockerfile
-                command: ["python", "-c", "import sys; sys.exit(1)"]
-        """))
+        agent_imports = {n for n in self._imported_names() if n.startswith("agents")}
+        assert agent_imports == {"agents.verification.rehearsal.probe"}
 
-        result = rehearsal_run(
-            {"change_id": "cr-docker-broken", "consumer": "coexistence"},
-            broken_compose,
-            project_name="interlock-rehearsal-broken",
-            timeout=120,
-        )
+    def test_never_emits_a_gate_verdict(self, provider, monkeypatch):
+        _install(monkeypatch)
+        rendered = str(run({"change_id": CHANGE_ID}, provider))
+        assert "NOT_PROVEN_SAFE" not in rendered
+        assert "VERIFIED" not in rendered
 
-        assert result.status == "failed", (
-            "A broken service must cause status='failed'. "
-            f"Actual: {result.status!r}. Output:\n"
-            + result.evidence[0].content.get("docker_output", "")[-1000:]
+
+# ---------------------------------------------------------------------------
+# The real thing — a genuine uvicorn process. No Docker required.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+class TestAgainstRealProvider:
+    def test_pre_migration_coexistence_holds(self):
+        """Start the real fixture provider and prove it serves the legacy shape."""
+        result = run({"change_id": CHANGE_ID, "expect_new": False}, REPO_ROOT)
+        assert result["status"] == "verified", _content(result)["detail"]
+        assert _content(result)["outcome"] == "coexistence_proven"
+
+    def test_unpatched_provider_fails_post_migration_expectations(self):
+        """
+        The negative case against a real server: the shipped fixture has not
+        been patched, so requiring the new field must fail.
+        """
+        result = run({"change_id": CHANGE_ID, "expect_new": True}, REPO_ROOT)
+        assert result["status"] == "failed"
+        assert "account_id" in _content(result)["detail"]
+
+    def test_a_directory_without_an_asgi_app_fails(self):
+        """A consumer fixture has no service:app, so the provider cannot start."""
+        result = run(
+            {"change_id": CHANGE_ID, "provider_path": "fixtures/checkout"}, REPO_ROOT
         )
+        assert result["status"] == "failed"
+        assert "did not start" in _content(result)["detail"]

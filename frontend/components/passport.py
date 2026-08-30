@@ -114,6 +114,19 @@ def render_passport(
     nodes = (graph or {}).get("nodes", [])
     affected = _list_or_none([n.get("label", n.get("id", "")) for n in nodes], "var(--il-text)")
 
+    # -- watsonx.ai reflection -----------------------------------------------
+    # Prose only, generated from the verdict above — it can explain a decision
+    # but never make one. See orchestrator/watsonx.py::narrate().
+    narration = (gate or {}).get("narration")
+    if narration:
+        narration_html = html.escape(narration)
+    else:
+        narration_html = (
+            '<span style="color:var(--il-muted)">not available — set '
+            "INTERLOCK_ENABLE_NARRATION=1 and watsonx.ai credentials in .env "
+            "to enable</span>"
+        )
+
     body = "".join(
         [
             _row("Change", html.escape(change.get("description", ""))),
@@ -133,6 +146,7 @@ def render_passport(
             _row("Coexistence rehearsal", coexistence_html),
             _row("Critic", critic_html),
             _row("Gate decision", gate_html),
+            _row("Watsonx.ai reflection", narration_html),
             _row("Approvals", approvals_html),
         ]
     )

@@ -1,313 +1,129 @@
-# Verification Pod — Implementation Plan
-## Interlock · IBM Dev Day 2026
+# Verification pod — plan and decisions
 
----
+Person 4's workstream: `agents/verification/`, `tests/verification/`,
+`docker-compose.yml`. The other three workstreams each shipped a plan document;
+this is the one that was missing.
 
-## Top-Level Overview
+## Status
 
-Build three verification agents (`contract_test`, `coexistence_rehearsal`, `critic`) and a supporting `docker-compose.yml`. All agents live in `agents/verification/`, all tests in `tests/verification/`. The real `fixtures/` directory must never be mutated by any test.
+| Deliverable | State |
+| --- | --- |
+| `critic` | Complete — 330 lines, 36 tests |
+| `contract-test` | Complete — real pytest execution, 22 tests |
+| `coexistence-rehearsal` | Complete — real uvicorn subprocess, 33 tests incl. 3 integration |
+| `docker-compose.yml` | Retained as an optional demo path (provider + probe) |
 
-**Key constraints grounded in code reading:**
+Full suite: **384 passed, 0 failed, 0 skipped**. The rehearsal's integration
+tests start a genuine uvicorn process and run by default — no daemon needed.
 
-- `VerificationResult` (in `orchestrator/schemas/verification.py`) requires: `change_id: str`, `consumer: str`, `status: Literal["verified","failed"]`, `evidence: list[Evidence]`.
-- `Evidence` (in `orchestrator/schemas/common.py`) requires: `claim_type` (one of `"dependency"`, `"migration_status"`, `"test_result"`, `"risk"`), `subject`, `content`, `source_ref`, `confidence`, `source_revision | None`.
-- The critic MUST emit only `claim_type="risk"` evidence. It MUST NOT set `status="verified"` or `"failed"` on its own — wait, actually `VerificationResult.status` is required by the schema. The resolution: critic returns `status="failed"` only when risks are found (reflecting evidence quality problems), never a "safe" verdict implying the gate can open. The gate decision belongs to `orchestrator/gate.py`.
-- No agent writes SQLite; no agent calls another agent.
-- `GET /change-requests/{id}/evidence` is the critic's only data source (real HTTP call).
-- The `_make_worktree` + `_prepare_account_service_worktree` pattern from `tests/implementation/test_fixture_integration.py` must be reused verbatim.
+## Decisions
 
-**Fixtures are pre-migration (customer_id only).** To test post-migration behavior, tests must: copy to `tmp_path` → run the relevant implementation agent against the copy → then run `contract_test.run()` against that migrated copy.
+### The rehearsal runs a real service — as a subprocess, not a container
 
-**Docker Compose:** Each fixture has a `Dockerfile`. account-service runs a uvicorn server; checkout/fraud/analytics-worker run pytest inside their containers. The compose file must be minimal and reproducible.
+The fixtures could not be composed as they stood: `account-service`'s Dockerfile
+ran `uvicorn app:app`, but `app.py` defines no ASGI application, and its
+`requirements.txt` listed only `pytest`. The container could never have started.
 
----
+The first fix promoted `account-service` into a real service and drove the
+rehearsal with `docker compose`, per the Person 4 brief. That was then reversed
+— see [ADR-0006](docs/adr/0006-rehearsal-uses-a-subprocess-not-docker.md).
 
-## Sub-Task 1 — `agents/verification/contract_test.py`
+Two things were wrong with the container version. The consumer services proved
+nothing: the consumer fixtures are pure functions taking a dict and make no HTTP
+calls, so containerising their pytest runs re-ran what `contract_test.py` already
+covers. And the daemon dependency left the rehearsal **unverified**, which is the
+worst state for the one agent whose job is to prove something.
 
-**Status:** `[ ] pending`
+The provider now starts as a local `uvicorn` subprocess on an OS-assigned free
+port. This keeps the property that mattered — separate process, real socket,
+real HTTP round trip — while running in ~1 second with no daemon, in CI, and
+verifiably. `docker-compose.yml` stays as an optional demo path, sharing one
+implementation of the assertions via `rehearsal/probe.py::check_payload`.
 
-### Intent
-Run the real pytest suite of a fixture (in a migrated `tmp_path` copy) as a subprocess. Return `VerificationResult` with `claim_type="test_result"` evidence populated from actual subprocess output. Never fabricate output.
+### The web layer lives in `service.py`, not `app.py`
 
-### Design
-```
-run(data: dict, repo_path: Path) -> VerificationResult
-```
+`app.py` is the file the provider-patch agent rewrites, and its regexes were
+written against exactly that code. Adding FastAPI scaffolding to it would risk
+the migration mechanics and would force a web framework onto the fixture's
+dependency-free unit tests.
 
-`data` keys:
-- `change_id: str`
-- `consumer: str` — e.g. `"checkout"`, `"account-service"`
-- `commit_ref: str | None` — the migration commit SHA (goes into `source_revision`)
+So `service.py` is a thin delegating wrapper: `/health` plus `/accounts/{key}`
+calling `get_account`. The path parameter is named `key`, not `customer_id`, so
+migrating the provider does not incidentally rewrite the HTTP layer. `app.py` is
+untouched and its three existing tests still pass.
 
-Internally:
-1. Invoke `subprocess.run(["python", "-m", "pytest", str(repo_path), "-v", "--tb=short"])`.
-2. Capture stdout+stderr.
-3. Parse returncode: 0 → `status="verified"`, non-zero → `status="failed"`.
-4. Build one `Evidence(claim_type="test_result", ...)` from the real output.
-5. Return `VerificationResult(change_id=..., consumer=..., status=..., evidence=[...])`.
+> **Cross-boundary change, called out per `AGENTS.md`:** `fixtures/` is Person
+> 2's area. Changes there were additive — a new `service.py`, two lines added to
+> `requirements.txt`, and a corrected `Dockerfile` CMD. No existing fixture logic
+> was modified.
 
-### Expected Outcomes
-- `run()` returns a schema-valid `VerificationResult`.
-- `evidence[0].claim_type == "test_result"`.
-- `evidence[0].content` includes `returncode` and `output` fields from real subprocess.
-- A broken fixture causes `status="failed"` — not silently `"verified"`.
+### The probe does not live under `fixtures/`
 
-### Todo List
-1. Implement `run(data, repo_path)` as described.
-2. Use `VerificationResult` and `Evidence` from orchestrator schemas (no duplicate models).
-3. Expose `REPO_ROOT` constant for tests to locate fixtures.
-4. Return `VerificationResult` (Pydantic model), not a plain dict.
+The discovery agents treat every immediate subdirectory of the fixtures root as
+a component. A probe directory there would have appeared in the dependency graph
+as a phantom consumer and polluted the gate's required set. It lives in
+`agents/verification/rehearsal/` instead.
 
-### Relevant Context
-- `orchestrator/schemas/verification.py` — `VerificationResult`
-- `orchestrator/schemas/common.py` — `Evidence`
-- `agents/implementation/provider_patch.py` — `_run_pytest()` pattern to reuse
-- `tests/implementation/test_fixture_integration.py` — `_make_worktree()` pattern
+### Not proven is recorded as failed, never skipped
 
----
+An unreachable Docker daemon, a missing compose file, a provider that never goes
+healthy, and a suite with no tests collected (pytest exit 5) all produce
+`status="failed"` with an `outcome` field distinguishing *why*. None of them
+produce a pass. `content["outcome"]` separates "tests failed" from "tests could
+not run" — both block the gate, but only the second means evidence is absent
+rather than damning.
 
-## Sub-Task 2 — `agents/verification/coexistence_rehearsal.py`
+This is `AGENTS.md` invariant 4, and it is the single most load-bearing property
+of both agents.
 
-**Status:** `[ ] pending`
+### The critic no longer hardcodes component names
 
-### Intent
-Use `docker compose` to run a real coexistence scenario: account-service (new, dual-field) + old consumers (pre-migration). Prove the dual-field provider is backward-compatible. Then separately run the migrated consumer containers. Capture real `docker compose` output; never fabricate it.
+`_REAL_COMPONENTS` was a frozenset of the four demo component names used in a
+live check. It broke invariant 6 twice: it hardcoded `analytics-worker` — the
+dependency the product claims to *discover* — and it silently skipped the
+missing-commit check for any component outside the list, weakening verification
+exactly where that was least visible.
 
-### Design
-```
-run(data: dict, compose_file: Path) -> VerificationResult
-```
+Components are now derived from evidence: `required_consumers` unioned with the
+subjects of discovery's `dependency` claims. What remains hardcoded is only
+`migration-plan`, the planner's own artifact subject — naming the planner's
+output is not naming a discovered component. The `625828d` regression stays
+covered, and a new test proves a component that was never in the old allowlist
+is now checked.
 
-`data` keys:
-- `change_id: str`
-- `consumer: str` — `"coexistence"` (the whole scenario, not one consumer)
-- `scenario: Literal["old_consumers", "migrated_consumers"]` — which half to run
+## How to run it
 
-Internally:
-1. `subprocess.run(["docker", "compose", "-f", str(compose_file), "up", "--abort-on-container-exit", "--exit-code-from", <service>])` 
-   — but since checkout/fraud/analytics-worker containers run `pytest` and exit, use `--exit-code-from` for the relevant service.
-2. Capture stdout+stderr.
-3. Non-zero exit → `status="failed"`.
-4. Return `VerificationResult` with `claim_type="test_result"` evidence.
+Unit tests need no Docker:
 
-### Docker Compose Architecture
-```
-docker-compose.yml
-  account-service   — builds from fixtures/account-service/, port 8000, always up
-  checkout          — builds from fixtures/checkout/, runs pytest tests/, depends_on account-service
-  fraud             — builds from fixtures/fraud/, runs pytest tests/, depends_on account-service
-  analytics-worker  — builds from fixtures/analytics-worker/, runs pytest tests/
-```
-
-The account-service Dockerfile already runs `uvicorn app:app --host 0.0.0.0 --port 8000`. The consumer Dockerfiles already run `python -m pytest tests/ -v`.
-
-Since the consumers run their pre-migration tests (which use `customer_id`), and the pre-migration account-service also returns only `customer_id`, the coexistence scenario for the compatibility window is: the NEW (patched) provider returns both fields, old consumers still work because `customer_id` is still present. 
-
-For the rehearsal test in CI: we keep the containers in their pre-migration state (as fixtures ship). This proves that `docker compose up` runs and exits successfully for the baseline. A separate negative test uses a deliberately broken consumer image.
-
-### Expected Outcomes
-- `run()` returns schema-valid `VerificationResult`.
-- `evidence[0].content` includes real `docker_output` from subprocess.
-- If a container exits with non-zero code, `status="failed"`.
-- Agent never fabricates output.
-
-### Todo List
-1. Write `docker-compose.yml` at the repo root building from `fixtures/*`.
-2. Implement `run(data, compose_file)`.
-3. Use `subprocess.run(["docker", "compose", ...])` — real call, not mocked.
-4. Return `VerificationResult` with `claim_type="test_result"` evidence.
-
-### Relevant Context
-- `fixtures/account-service/Dockerfile` — `uvicorn app:app --host 0.0.0.0 --port 8000`
-- `fixtures/checkout/Dockerfile` — `python -m pytest tests/ -v`
-- `fixtures/fraud/Dockerfile` — `python -m pytest tests/ -v`
-- `fixtures/analytics-worker/Dockerfile` — `python -m pytest tests/ -v`
-- `orchestrator/schemas/verification.py`
-
----
-
-## Sub-Task 3 — `agents/verification/critic.py`
-
-**Status:** `[ ] pending`
-
-### Intent
-Read evidence for a change request from the orchestrator's HTTP API (`GET /change-requests/{id}/evidence`). Flag evidence quality issues as `claim_type="risk"` evidence. Never decide the gate; never write the ledger.
-
-### Design
-```
-run(data: dict, base_url: str) -> VerificationResult
+```bash
+.venv/Scripts/python.exe -m pytest tests/verification/ -q
 ```
 
-`data` keys:
-- `change_id: str`
-- `consumer: str` — `"critic"` (the critic speaks for the whole change, not one consumer)
-- `required_consumers: list[str]` — e.g. `["checkout", "fraud", "analytics-worker"]`
-- `latest_migration_commit_ts: str | None` — ISO timestamp of the last implementation commit (optional; used for staleness check)
+That includes the real-server integration tests — no daemon required.
 
-Internally:
-1. `GET {base_url}/change-requests/{change_id}/evidence` — real `httpx` or `requests` call.
-2. Parse the `EvidenceListResponse` shape (`{"change_id": ..., "evidence": [...]}`).
-3. Apply checks in order:
-   a. **Missing consumer**: for each `required_consumer`, check that at least one `migration_status` evidence item exists with `subject == consumer`. If absent → risk.
-   b. **No commit_ref**: `migration_status` evidence with no `source_revision` → risk.
-   c. **Stale evidence**: if `latest_migration_commit_ts` provided, any `test_result` evidence whose `created_at` is older than that timestamp → risk.
-4. Build one `Evidence(claim_type="risk", ...)` per flagged issue.
-5. If no risks found → `status="verified"` (evidence quality is clean), empty evidence list.
-6. If any risks found → `status="failed"`, evidence = list of risk items.
+The optional containerised demo path:
 
-**Critical constraint**: The critic MUST NOT return `claim_type` anything other than `"risk"`. It MUST NOT set `"verified"` to mean "safe to deploy" — the gate decides safety.
-
-### Expected Outcomes
-- `run()` returns schema-valid `VerificationResult`.
-- All evidence items have `claim_type="risk"`.
-- `run()` never writes to the ledger (verified by test: inspect what it returns, ensure no SQLite calls).
-- Stale evidence is detected.
-- Missing consumer migration is detected.
-
-### Todo List
-1. Implement `run(data, base_url)` using `httpx` (or `requests`).
-2. Only emit `claim_type="risk"` Evidence items.
-3. Never set a gate verdict — just risk flags.
-4. Return `VerificationResult`.
-
-### Relevant Context
-- `orchestrator/main.py` lines 169-177 — `GET /change-requests/{id}/evidence` route
-- `orchestrator/schemas/verification.py`
-- `orchestrator/schemas/common.py`
-
----
-
-## Sub-Task 4 — `docker-compose.yml`
-
-**Status:** `[ ] pending`
-
-### Intent
-Minimal compose file that builds all four fixture services and runs their tests. The consumer services run pytest and exit; account-service stays up for network reachability during the compatibility window scenario.
-
-### Design
-```yaml
-services:
-  account-service:
-    build: ./fixtures/account-service
-    ports: ["8000:8000"]
-
-  checkout:
-    build: ./fixtures/checkout
-    depends_on: [account-service]
-
-  fraud:
-    build: ./fixtures/fraud
-    depends_on: [account-service]
-
-  analytics-worker:
-    build: ./fixtures/analytics-worker
+```bash
+docker compose run --rm coexistence-probe
 ```
 
-No Kafka, no K8s, no Temporal. No volumes needed for the test run.
+`EXPECT_NEW=1` flips the probe to require both fields, which is the assertion
+that holds once the provider patch has landed.
 
-### Expected Outcomes
-- `docker compose up --abort-on-container-exit` exits 0 when all services pass.
-- A broken service causes non-zero exit.
+## Known issues
 
-### Todo List
-1. Write `docker-compose.yml` at the repo root.
-
----
-
-## Sub-Task 5 — `tests/verification/` test suite
-
-**Status:** `[ ] pending`
-
-### Intent
-Full test suite proving every required property. Uses `tmp_path` isolation (never mutates real `fixtures/`). Explicitly asserts the real fixtures are unchanged after every test that touches a copy.
-
-### Test Structure
-
-**`test_contract_test.py`**
-- `test_contract_test_runs_real_pytest`: copy fixture to `tmp_path`, run implementation agent, run `contract_test.run()`, assert `status="verified"`, assert `evidence[0].content["output"]` contains real pytest output.
-- `test_contract_test_detects_failure`: copy fixture to `tmp_path`, inject a broken test (adds `assert False`), run `contract_test.run()`, assert `status="failed"`.
-- `test_contract_test_schema_valid`: assert result validates as `VerificationResult`.
-- `test_contract_test_no_fixture_mutation`: assert `fixtures/checkout/checkout.py` content unchanged after test.
-
-**`test_coexistence_rehearsal.py`** *(marked `@pytest.mark.docker`)*
-- `test_rehearsal_runs_docker_compose`: call `coexistence_rehearsal.run()`, assert `status="verified"`, assert `evidence[0].content["docker_output"]` is a non-empty string.
-- `test_rehearsal_detects_broken_service`: build a compose override with a broken command, assert `status="failed"`.
-- `test_rehearsal_schema_valid`: assert result validates as `VerificationResult`.
-
-**`test_critic.py`**
-- `test_critic_detects_missing_consumer`: spin up a mock HTTP server returning evidence with no checkout migration entry; assert critic returns a risk item for missing checkout.
-- `test_critic_detects_stale_evidence`: mock HTTP returning a `test_result` evidence item with an old `created_at`; pass a newer `latest_migration_commit_ts`; assert risk flagged.
-- `test_critic_no_ledger_writes`: run critic, inspect that it only returns a `VerificationResult` and has no SQLite calls (structural — verified by reading the code and by ensuring `import orchestrator.ledger` is absent from `critic.py`).
-- `test_critic_only_emits_risk_evidence`: assert all `evidence[i].claim_type == "risk"`.
-- `test_critic_schema_valid`: assert result validates as `VerificationResult`.
-- `test_critic_no_verdict_when_risks_found`: critic returns `status="failed"` when risks found — not a gate VERIFIED/NOT_PROVEN_SAFE decision.
-
-**Common assertion in every test class:**
-- `test_no_fixture_mutation`: after running any agent in a `tmp_path`, assert the canonical fixture file content equals `before_content`.
-
-### Todo List
-1. Write `tests/verification/__init__.py`.
-2. Write `tests/verification/test_contract_test.py`.
-3. Write `tests/verification/test_coexistence_rehearsal.py`.
-4. Write `tests/verification/test_critic.py`.
-5. Ensure every test that copies a fixture also explicitly asserts the real fixture was not mutated.
-6. Mark Docker-dependent tests with `@pytest.mark.docker` so they can be skipped in CI without Docker.
-
-### Relevant Context
-- `tests/implementation/test_fixture_integration.py` — `_make_worktree()` for tmp_path setup
-- `agents/implementation/provider_patch.py` — `run()` for pre-seeding migrated state
-- `agents/implementation/consumer_migration.py` — `run()` for pre-seeding migrated state
-- `orchestrator/schemas/verification.py` — schema validation
-
----
-
-## Architecture Diagram
-
-```
-fixtures/ (never mutated)
-    account-service/   checkout/   fraud/   analytics-worker/
-           |               |           |           |
-    [tmp_path copy]  [tmp_path copy]  ...        ...
-           |               |
-    provider_patch()  consumer_migration()
-           |               |
-    contract_test.run()  contract_test.run()
-           |               |
-    VerificationResult   VerificationResult
-           |
-    [returned to orchestrator — ledger writes by orchestrator only]
-
-    critic.run(change_id, base_url)
-        → GET /change-requests/{id}/evidence   [read-only HTTP]
-        → returns list[Evidence(claim_type="risk")]
-        → VerificationResult
-
-    coexistence_rehearsal.run(data, compose_file)
-        → subprocess docker compose up
-        → VerificationResult
-```
-
----
-
-## Dependencies
-
-- Python stdlib: `subprocess`, `pathlib`, `datetime`
-- `httpx` (or `requests`) — critic HTTP call
-- `pydantic` — already in project
-- `pytest` — already in project
-- Docker + docker-compose — only for coexistence tests
-- `orchestrator.schemas.verification.VerificationResult`
-- `orchestrator.schemas.common.Evidence`
-- Implementation agents (`provider_patch`, `consumer_migration`) — used in tests only, not imported by verification agents themselves
-
----
-
-## Open Questions / Decisions Made
-
-1. **Critic `status` field**: Since `VerificationResult.status` is `Literal["verified","failed"]` and the critic must not issue a safety verdict, we use: `"failed"` = risks found (evidence quality problems), `"verified"` = no quality problems found. This is evidence-quality status, not migration safety status. The gate reads migration_status rows, not critic output.
-
-2. **`consumer` field for critic and rehearsal**: The schema requires `consumer: str`. Critic uses `"critic"` as the consumer name; rehearsal uses `"coexistence"`. These are conventional, not one of the four fixture services.
-
-3. **Coexistence test strategy**: Keep the coexistence rehearsal in the pre-migration baseline state (what fixtures already are). This means: old provider + old consumers → all pass. The separate "negative path" test uses a docker compose override with a broken CMD.
-
-4. **`httpx` vs `requests`**: Use `httpx` (synchronous) since it's more modern. If not in the project's deps, fall back to `requests`.
+- ~~The live rehearsal has not been run end-to-end.~~ **Resolved 2026-08-29**
+  by moving off Docker (ADR-0006). The rehearsal now runs for real in every test
+  run: three integration tests start a genuine uvicorn process and cover the
+  passing case, an unpatched provider failing post-migration expectations, and a
+  directory with no ASGI app.
+- The optional `docker-compose.yml` path is syntax-validated
+  (`docker compose config`) but has not been executed, since no daemon was
+  reachable during development. Verify it before relying on it in a demo.
+- ~~Four tests in `tests/implementation/test_consumer_migration.py` fail in a
+  full-suite run.~~ **Fixed 2026-08-29.** They were not a test-ordering problem:
+  they imported `from tests.implementation.conftest import ...`, which cannot
+  resolve without `tests/__init__.py`. Fixed by using the
+  `tmp_checkout_repo` / `tmp_fraud_repo` / `tmp_analytics_worker_repo` fixtures
+  the conftest already exposed. No assertion was changed. `AGENTS.md` and
+  `README.md` have been corrected.
