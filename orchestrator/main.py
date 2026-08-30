@@ -11,7 +11,9 @@ Endpoints:
   POST /change-requests/{id}/approve
 
 All responses use stable Pydantic response models.
-Start with: uvicorn orchestrator.main:app --reload
+Start with: uvicorn orchestrator.main:app
+   Or with reload: uvicorn orchestrator.main:app --reload --reload-dir orchestrator --reload-dir agents
+   Or: python run_backend.py
 """
 
 from __future__ import annotations

@@ -154,7 +154,9 @@ Polling every 1–2s is fine. Do not introduce WebSockets.
 Backend:
 
 ```bash
-uvicorn orchestrator.main:app --reload
+uvicorn orchestrator.main:app
+# or with safe reload:
+python run_backend.py
 ```
 
 Frontend (from the repository root, so `.streamlit/config.toml` is picked up):

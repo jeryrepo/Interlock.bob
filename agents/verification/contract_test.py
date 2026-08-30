@@ -19,6 +19,7 @@ Contract:
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,7 @@ def _run_pytest(repo_path: Path) -> tuple[int, str]:
     Returns (returncode, combined_output).  The combined output is the raw
     stdout+stderr from the pytest process — never synthesised.
     """
-    cmd = ["python", "-m", "pytest", str(repo_path), "-v", "--tb=short"]
+    cmd = [sys.executable, "-m", "pytest", str(repo_path), "-v", "--tb=short"]
     result = subprocess.run(
         cmd,
         capture_output=True,

@@ -42,8 +42,10 @@ pip install -r requirements.txt
 **3. Start the backend** (terminal 1)
 
 ```bash
-uvicorn orchestrator.main:app --reload
+uvicorn orchestrator.main:app
 ```
+
+*(Or if you want live reloading for code changes: `python run_backend.py`)*
 
 Serves `http://localhost:8000`. Interactive API docs at http://localhost:8000/docs.
 
