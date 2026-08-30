@@ -309,7 +309,7 @@ def run(
         If the HTTP call to the orchestrator fails.
     """
     change_id: str = data.get("change_id", "")
-    consumer: str = data.get("consumer", "critic")
+    consumer: str = data.get("consumer") or "critic"
     required_consumers: list[str] = data.get("required_consumers", [])
     latest_migration_commit_ts: str | None = data.get("latest_migration_commit_ts")
 

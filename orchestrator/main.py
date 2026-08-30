@@ -345,6 +345,7 @@ class GateStatusResponse(BaseModel):
     required_consumers: list[str]
     unresolved: list[str]
     consumers: list[ConsumerMigrationItem]
+    narration: str | None = None
 
 
 class ApprovalItem(BaseModel):
@@ -398,6 +399,26 @@ def get_gate_status(change_id: str):
         reason = live.reason
         decided_at = None
 
+    narration: str | None = None
+    watsonx_settings = app.state.settings.watsonx
+    if recorded is not None and watsonx_settings.enabled:
+        from orchestrator import watsonx as _watsonx
+
+        evidence_lines = [
+            f"[{e['claim_type']}] {e['subject']}: {e['content']}"
+            for e in ledger.get_evidence(conn, change_id)
+        ]
+        narration = _watsonx.narrate(
+            gate={
+                "result": result,
+                "reason": reason,
+                "required_consumers": live.required_consumers,
+                "unresolved": live.unresolved,
+            },
+            evidence_lines=evidence_lines,
+            settings=watsonx_settings,
+        )
+
     return GateStatusResponse(
         change_id=change_id,
         state=row["status"],
@@ -408,6 +429,7 @@ def get_gate_status(change_id: str):
         required_consumers=live.required_consumers,
         unresolved=live.unresolved,
         consumers=migrations,
+        narration=narration,
     )
 
 
