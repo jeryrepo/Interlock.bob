@@ -1,0 +1,32 @@
+# Dockerfile.backend
+# Interlock — FastAPI orchestrator
+#
+# Built on IBM Cloud using:
+#   ibmcloud ce buildrun submit --name interlock-backend-build \
+#     --source . --dockerfile Dockerfile.backend ...
+#
+# Runtime env vars expected:
+#   INTERLOCK_DB_PATH  (default: /data/interlock.db — mount a PVC at /data)
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install Python dependencies first (layer-cached on code-only changes)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source
+COPY orchestrator/ ./orchestrator/
+COPY agents/       ./agents/
+COPY fixtures/     ./fixtures/
+
+# /data is the mount point for the persistent volume claim
+# If no PVC is attached the DB lands in /data inside the container (ephemeral)
+RUN mkdir -p /data
+
+ENV INTERLOCK_DB_PATH=/data/interlock.db
+
+EXPOSE 8000
+
+CMD ["uvicorn", "orchestrator.main:app", "--host", "0.0.0.0", "--port", "8000"]

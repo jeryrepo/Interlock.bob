@@ -1,0 +1,31 @@
+# Dockerfile.frontend
+# Interlock — Streamlit UI
+#
+# Built on IBM Cloud using:
+#   ibmcloud ce buildrun submit --name interlock-frontend-build \
+#     --source . --dockerfile Dockerfile.frontend ...
+#
+# Runtime env vars expected:
+#   ORCHESTRATOR_API_URL  (HTTPS URL of the deployed backend Code Engine app)
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Only the packages the frontend actually imports
+RUN pip install --no-cache-dir streamlit pyvis requests pyyaml
+
+# Copy Streamlit theme config — must be at ./streamlit/ relative to CWD
+# when `streamlit run` is executed.
+COPY .streamlit/ ./.streamlit/
+
+# Copy frontend source
+COPY frontend/ ./frontend/
+
+EXPOSE 8501
+
+# headless=true is already set in .streamlit/config.toml
+# --server.address=0.0.0.0 makes it reachable inside the container
+CMD ["streamlit", "run", "frontend/streamlit_app.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0"]
